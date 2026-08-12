@@ -1,0 +1,143 @@
+{% extends "base.html" %}{% block title %}{{ spec.title }}{% endblock %}
+{% block body %}
+<h1>{{ spec.title }}</h1>
+<p class="sub">{{ spec.intro }}</p>
+
+{% if task.concept == 'SALES' %}
+<div class="panel row" style="justify-content:space-between">
+  <div class="small">¿Preferís cargarlo en Excel? La planilla se genera con tu estructura:
+    sólo tus productos y tus períodos. Un error rechaza toda la planilla.</div>
+  <div class="row">
+    <a class="btn ghost" href="{{ url_for('plantilla', task_id=task.id) }}">Descargar plantilla</a>
+    <form method="post" action="{{ url_for('importar', task_id=task.id) }}"
+          enctype="multipart/form-data" class="row">
+      <input type="file" name="file" accept=".xlsx" style="width:auto">
+      <button class="ghost">Importar</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if spec.rows %}
+<form method="post" action="{{ url_for('guardar', task_id=task.id) }}">
+<div class="panel"><table>
+  <thead><tr>
+    {% for c in spec.columns %}<th>{{ c }}</th>{% endfor %}
+    {% for f in spec.rows[0].fields %}<th>{{ f.label }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for row in spec.rows %}
+  <tr>
+    <td>{{ row.label }}</td>
+    {% if spec.columns|length > 1 %}<td class="small">{{ row.detail }}</td>{% endif %}
+    {% for f in row.fields %}
+    <td><div class="field">
+      <input type="number" step="any" name="{{ f.name }}" value="{{ f.value }}"
+             placeholder="0" style="max-width:140px">
+      <span class="u">{{ f.currency }}</span>
+    </div></td>
+    {% endfor %}
+  </tr>
+  {% if spec.columns|length == 1 %}
+  <tr><td colspan="{{ 1 + row.fields|length }}" class="small"
+      style="border-bottom:1px solid var(--line);padding-top:0">{{ row.detail }}</td></tr>
+  {% endif %}
+  {% endfor %}
+  </tbody>
+</table></div>
+
+<div class="sticky-actions row">
+  <button type="submit">Guardar borrador</button>
+  <button type="submit" formaction="{{ url_for('enviar', task_id=task.id) }}"
+          class="ghost">Enviar a revisión</button>
+  <span class="small">El borrador no entra al workflow hasta que lo envíes.</span>
+</div>
+</form>
+{% endif %}
+
+{% if task.concept == 'PAYROLL_HEADCOUNT' %}
+<h2>Altas y bajas</h2>
+<div class="panel">
+  <p class="small">Informá cantidad, área y fecha estimada. El costo lo calcula Nómina
+    aplicando los aumentos posteriores a la fecha de ingreso de cada persona.</p>
+  <form method="post" action="{{ url_for('dotacion', task_id=task.id) }}" class="row">
+    <select name="change_type" style="width:auto"><option value="HIRED">Alta</option>
+      <option value="TERMINATED">Baja</option></select>
+    <select name="area_id" style="width:auto">
+      {% for a in spec.extra.areas %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}
+    </select>
+    <input type="number" name="quantity" value="1" min="1" style="width:90px">
+    <input type="date" name="effective_date" style="width:auto"
+           min="{{ spec.extra.fy_start }}" max="{{ spec.extra.fy_end }}"
+           value="{{ spec.extra.fy_start }}">
+    <button class="ghost">Registrar</button>
+  </form>
+  {% if spec.extra.movements %}
+  <table style="margin-top:14px">
+    <thead><tr><th>Tipo</th><th>Área</th><th>Cantidad</th><th>Fecha</th></tr></thead><tbody>
+    {% for m in spec.extra.movements %}
+    <tr><td>{{ 'Alta' if m.change_type.value=='HIRED' else 'Baja' }}</td>
+      <td>{{ m.area_id }}</td><td>{{ m.value|money }}</td><td>{{ m.effective_date }}</td></tr>
+    {% endfor %}
+    </tbody></table>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if task.concept == 'CAPEX' %}
+<div class="panel">
+  <form method="post" action="{{ url_for('capex', task_id=task.id) }}" class="row">
+    <select name="category_id" style="width:auto">
+      {% for c in spec.extra.categories %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+    </select>
+    <select name="scope" style="width:auto">
+      {% for k, l in spec.extra.scopes %}<option value="{{ k }}">{{ l }}</option>{% endfor %}
+    </select>
+    <select name="period" style="width:auto">
+      {% for p in spec.extra.periods %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+    </select>
+    <input type="number" step="any" name="amount" placeholder="Importe" style="width:130px">
+    <select name="currency" style="width:auto">
+      {% for c in spec.extra.currencies %}<option>{{ c }}</option>{% endfor %}
+    </select>
+    <button class="ghost">Agregar</button>
+  </form>
+  {% if spec.extra.capex_items %}
+  <table style="margin-top:14px">
+    <thead><tr><th>Categoría</th><th>Ámbito</th><th>Período</th><th>Importe</th></tr></thead><tbody>
+    {% for i in spec.extra.capex_items %}
+    <tr><td>{{ i.capex_category_id }}</td><td>{{ i.scope_key }}</td><td>{{ i.period }}</td>
+      <td>{{ i.value|money }} {{ i.currency }}</td></tr>
+    {% endfor %}
+    </tbody></table>
+  {% endif %}
+  <div class="sticky-actions row">
+    <form method="post" action="{{ url_for('enviar', task_id=task.id) }}">
+      <button class="ghost">Enviar a revisión</button></form>
+  </div>
+</div>
+{% endif %}
+
+{% if is_cfo and task.status.value == 'IN_REVIEW' %}
+<h2>Revisión</h2>
+<div class="panel row">
+  <form method="post" action="{{ url_for('aprobar', task_id=task.id) }}"><button>Aprobar</button></form>
+  <form method="post" action="{{ url_for('rechazar', task_id=task.id) }}" class="row">
+    <input type="text" name="comment" placeholder="Motivo del rechazo (obligatorio)"
+           style="width:340px">
+    <button class="danger">Rechazar</button>
+  </form>
+</div>
+{% endif %}
+
+{% if task.history %}
+<h3>Historial</h3>
+<div class="panel"><table>
+  <thead><tr><th>Cuándo</th><th>Quién</th><th>De</th><th>A</th><th>Comentario</th></tr></thead><tbody>
+  {% for h in task.history %}
+  <tr><td class="small">{{ h.at[:16].replace('T',' ') }}</td><td>{{ h.actor }}</td>
+    <td>{{ h['from'] }}</td><td>{{ h.to }}</td><td class="small">{{ h.comment or '' }}</td></tr>
+  {% endfor %}
+</tbody></table></div>
+{% endif %}
+{% endblock %}

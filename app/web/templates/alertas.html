@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% block title %}Alertas{% endblock %}
+{% block body %}
+<h1>Alertas, supuestos y faltantes</h1>
+<p class="sub">No todo error bloquea. Las validaciones estructurales impiden avanzar;
+las alertas informan y permiten continuar.</p>
+
+<h2>Validaciones bloqueantes ({{ report.blocking|length }})</h2>
+<div class="panel">
+{% if report.blocking %}<ul>{% for f in report.blocking %}<li>{{ f.message }}</li>{% endfor %}</ul>
+{% else %}<p class="small">Ninguna.</p>{% endif %}
+</div>
+
+<h2>Alertas informativas ({{ report.alerts|length }})</h2>
+<div class="panel">
+{% if report.alerts %}
+<table><thead><tr><th>Alerta</th><th>Origen</th><th>Estado</th></tr></thead><tbody>
+{% for a in report.alerts %}
+<tr><td>{{ a.message }}</td><td class="small">{{ a.code }}</td>
+<td><span class="tag warn">{{ a.status.value|lower }}</span></td></tr>
+{% endfor %}
+</tbody></table>
+{% else %}<p class="small">Ninguna.</p>{% endif %}
+</div>
+
+<h2>Tareas pendientes ({{ report.pending_tasks|length }})</h2>
+<div class="panel"><ul>{% for t in report.pending_tasks %}<li>{{ t.label }} — {{ t.status.value|lower }}</li>
+{% else %}<li>Ninguna.</li>{% endfor %}</ul></div>
+
+<h2>Supuestos utilizados</h2>
+<div class="panel"><ul>{% for s in report.assumptions %}<li>{{ s }}</li>{% endfor %}</ul></div>
+{% endblock %}

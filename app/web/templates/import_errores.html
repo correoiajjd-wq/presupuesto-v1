@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block title %}Importación rechazada{% endblock %}
+{% block body %}
+<h1>Importación rechazada</h1>
+<p class="sub">La importación es atómica: un solo error rechaza toda la planilla y no se
+incorpora ningún dato. Corregí lo siguiente y volvé a subirla.</p>
+<div class="panel"><table>
+<thead><tr><th>Fila</th><th>Columna</th><th>Valor</th><th>Error</th><th>Qué se espera</th></tr></thead>
+<tbody>
+{% for e in result.errors %}
+<tr><td>{{ e.row }}</td><td>{{ e.column }}</td><td>{{ e.value }}</td>
+  <td>{{ e.error }}</td><td class="small">{{ e.expected }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+<a class="btn ghost" href="{{ url_for('carga', task_id=task.id) }}">Volver</a>
+{% endblock %}

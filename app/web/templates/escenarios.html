@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% block title %}Escenarios{% endblock %}
+{% block body %}
+<h1>Escenarios</h1>
+<p class="sub">Un escenario modifica <b>inputs</b> y el motor recalcula las consecuencias.
+No se puede tocar un valor calculado: no existe "EBITDA +1M". El presupuesto base no cambia.</p>
+
+<div class="panel">
+<form method="post">
+  <div class="row" style="margin-bottom:10px">
+    <input type="text" name="name" placeholder="Nombre del escenario" required style="width:260px">
+  </div>
+  <table>
+  <thead><tr><th>Variable</th><th>Ámbito</th><th>Variación %</th></tr></thead><tbody>
+  {% for c, label in [('SALES','Ventas'),('COST','Costo (vía margen)'),('EXPENSES','Gastos'),
+                      ('PAYROLL','Nómina'),('PURCHASES','Compras'),('CAPEX','CAPEX')] %}
+  <tr>
+    <td>{{ label }}<input type="hidden" name="concept" value="{{ c }}"></td>
+    <td><select name="unit" style="width:auto"><option value="">Toda la empresa</option>
+      {% for u in units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select></td>
+    <td><input type="number" step="any" name="variation" placeholder="0" style="max-width:120px"></td>
+  </tr>
+  {% endfor %}
+  </tbody></table>
+  <div class="row" style="margin-top:12px"><button>Calcular escenario</button>
+    <span class="small">Ej: Ventas −10 y Costo +5 para un escenario pesimista.</span></div>
+</form>
+</div>
+
+{% for sid, rows in rows.items() %}
+<h2>{{ scenarios[sid].name }}</h2>
+<div class="panel"><table>
+<thead><tr><th>Concepto</th><th>Base</th><th>Escenario</th><th>Variación</th><th>%</th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td>{{ r.metric }}</td><td>{{ r.base|money }}</td><td>{{ r.scenario|money }}</td>
+<td>{{ r.delta|money }}</td>
+<td>{{ ((r.delta_pct*100)|round(1)) ~ '%' if r.delta_pct is not none else '—' }}</td></tr>
+{% endfor %}
+</tbody></table>
+<p class="small">Ajustes:
+{% for a in scenarios[sid].adjustments %}{{ a.concept }} {{ (a.variation*100)|round(1) }}%{% if a.business_unit_id %} ({{ a.business_unit_id }}){% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+</p></div>
+{% endfor %}
+{% endblock %}

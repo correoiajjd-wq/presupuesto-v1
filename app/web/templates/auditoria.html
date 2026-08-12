@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block title %}Auditoría{% endblock %}
+{% block body %}
+<h1>Auditoría</h1>
+<p class="sub">Quién, cuándo, qué cambió, valor anterior y valor nuevo. No se sobrescribe:
+debe poder reconstruirse qué sabía el sistema en cualquier momento.</p>
+<div class="panel" style="overflow-x:auto"><table>
+<thead><tr><th>Cuándo</th><th>Quién</th><th>Acción</th><th>Entidad</th><th>Antes</th><th>Después</th></tr></thead>
+<tbody>
+{% for e in events %}
+<tr><td class="small">{{ e.at.strftime('%d/%m %H:%M:%S') }}</td><td>{{ e.actor }}</td>
+<td>{{ e.action }}</td><td class="small">{{ e.entity_type }} {{ e.entity_id[:34] }}</td>
+<td class="small">{{ (e.before or '')[:24] }}</td><td class="small">{{ (e.after or '')[:24] }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endblock %}

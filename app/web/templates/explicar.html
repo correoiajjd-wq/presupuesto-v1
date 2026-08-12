@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% block title %}De dónde sale este número{% endblock %}
+{% macro node(n) %}
+<li>
+  <b>{{ n.key }}</b> = {{ n.value|money }}
+  {% if n.meta and n.meta.formula %}<span class="small"> — {{ n.meta.formula }}</span>{% endif %}
+  {% if n.meta and n.meta.quantity %}<span class="small"> ({{ n.meta.quantity }} x {{ n.meta.price }} {{ n.meta.currency }})</span>{% endif %}
+  {% if n.depends_on %}<ul>{% for d in n.depends_on %}{{ node(d) }}{% endfor %}</ul>
+  {% elif n.depends_on_keys %}<ul><li class="small">depende de {{ n.depends_on_keys|length }} nodos</li></ul>
+  {% endif %}
+</li>
+{% endmacro %}
+{% block body %}
+<h1>De dónde sale este número</h1>
+<p class="sub">Cada valor calculado conoce sus dependencias. El grafo de esta versión tiene
+{{ stats.nodes }} nodos y {{ stats.edges }} dependencias; cuando cambia un input, sólo se
+recalcula lo que cuelga de él.</p>
+<div class="panel">
+  <form method="get" class="row">
+    <input type="text" name="key" value="{{ key }}" style="width:340px">
+    <input type="number" name="depth" value="2" min="1" max="4" style="width:80px">
+    <button class="ghost">Explicar</button>
+  </form>
+</div>
+<div class="panel"><ul style="color:var(--txt)">{{ node(tree) }}</ul></div>
+{% endblock %}

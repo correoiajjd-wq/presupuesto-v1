@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% block title %}Ratios{% endblock %}
+{% block body %}
+<h1>Ratios y objetivos</h1>
+<p class="sub">El CFO selecciona del catálogo; no escribe fórmulas. Un objetivo incumplido
+genera alerta pero no bloquea la aprobación. Si falta un dato, el ratio dice
+"no calculable" — nunca 0%.</p>
+<div class="panel">
+  <form method="get"><select name="scope" onchange="this.form.submit()" style="width:auto">
+    {% for key, name, level in scopes %}
+    <option value="{{ key }}" {{ 'selected' if key==scope }}>{{ name }}</option>{% endfor %}
+  </select></form>
+</div>
+<div class="panel"><table>
+<thead><tr><th>{{ label }}</th><th>Fórmula</th><th>Valor</th><th>Objetivo</th><th>Estado</th></tr></thead>
+<tbody>
+{% for r in rows %}
+<tr>
+  <td>{{ r.name }}</td>
+  <td class="small">{{ r.formula }}</td>
+  <td>{{ r.display }}</td>
+  <td>{{ r.objective.display if r.objective else '—' }}</td>
+  <td>{% if r.objective_met is none %}
+        {% if r.computable %}<span class="tag na">sin objetivo</span>
+        {% else %}<span class="tag na">no calculable</span>{% endif %}
+      {% elif r.objective_met %}<span class="tag ok">cumple</span>
+      {% else %}<span class="tag bad">incumplido</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+{% endblock %}

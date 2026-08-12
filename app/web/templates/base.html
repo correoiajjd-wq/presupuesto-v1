@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Presupuesto{% endblock %}</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#1d212a;--line:#262b36;--txt:#e7e9ee;
+--muted:#98a0b0;--pos:#3fa66a;--neg:#c9584f;--accent:#5b8def;--warn:#c9a227;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+header{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:9}
+.hd{max-width:1180px;margin:0 auto;padding:11px 22px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:-.2px}
+nav{display:flex;gap:16px;flex-wrap:wrap;font-size:13px}
+nav a{color:var(--muted)} nav a.on{color:var(--txt);font-weight:600}
+.who{margin-left:auto;font-size:12px;color:var(--muted);text-align:right}
+.wrap{max-width:1180px;margin:0 auto;padding:26px 22px 70px}
+h1{font-size:21px;margin:0 0 4px} h2{font-size:15px;margin:28px 0 10px}
+h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:18px 0 8px}
+p.sub{color:var(--muted);margin:0 0 18px;max-width:74ch}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:14px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+th:first-child,td:first-child{text-align:left}
+thead th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+tr.total td{font-weight:700;background:rgba(91,141,239,.07)}
+tbody tr:hover{background:rgba(255,255,255,.02)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+.kpi .l{color:var(--muted);font-size:12px}.kpi .v{font-size:21px;font-weight:650}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;font-weight:600;white-space:nowrap}
+.ok{background:rgba(63,166,106,.15);color:var(--pos)}
+.bad{background:rgba(201,88,79,.15);color:var(--neg)}
+.na{background:rgba(152,160,176,.15);color:var(--muted)}
+.warn{background:rgba(201,162,39,.15);color:var(--warn)}
+input,select,button,textarea{font:inherit}
+input[type=number],input[type=text],input[type=date],select,textarea{
+background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:7px;
+padding:6px 9px;width:100%;text-align:right}
+select,input[type=text],input[type=date],textarea{text-align:left}
+input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button,.btn{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:8px 15px;
+cursor:pointer;font-weight:600;font-size:13px;display:inline-block}
+button.ghost,.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+button.danger{background:var(--neg)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.flash{padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px}
+.flash.ok{background:rgba(63,166,106,.12);border:1px solid rgba(63,166,106,.3);color:#8fd6ae}
+.flash.error{background:rgba(201,88,79,.12);border:1px solid rgba(201,88,79,.35);color:#f0a49c}
+.small{font-size:12px;color:var(--muted)}
+ul{margin:6px 0;padding-left:19px;color:var(--muted)}li{margin:3px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+.bar{height:8px;background:var(--accent);border-radius:2px;display:block}
+.barneg{background:var(--neg)}
+.field{display:flex;gap:6px;align-items:center;justify-content:flex-end}
+.field .u{color:var(--muted);font-size:11px;min-width:58px;text-align:left}
+.sticky-actions{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);
+padding:16px 0 0;margin-top:8px}
+</style>
+</head>
+<body>
+<header><div class="hd">
+  <span class="brand">{{ budget.name if budget else 'Presupuesto' }}</span>
+  {% if current_user %}
+  <nav>
+    <a href="{{ url_for('panel') }}" class="{{ 'on' if request.endpoint=='panel' }}">Panel</a>
+    <a href="{{ url_for('tareas') }}" class="{{ 'on' if request.endpoint in ('tareas','carga') }}">Tareas</a>
+    <a href="{{ url_for('pnl') }}" class="{{ 'on' if request.endpoint=='pnl' }}">P&amp;L</a>
+    <a href="{{ url_for('ratios') }}" class="{{ 'on' if request.endpoint=='ratios' }}">Ratios</a>
+    {% if version.configuration.inventory.enabled %}
+    <a href="{{ url_for('stock') }}" class="{{ 'on' if request.endpoint=='stock' }}">Stock</a>{% endif %}
+    <a href="{{ url_for('escenarios') }}" class="{{ 'on' if request.endpoint=='escenarios' }}">Escenarios</a>
+    <a href="{{ url_for('alertas') }}" class="{{ 'on' if request.endpoint=='alertas' }}">Alertas</a>
+    {% if is_cfo %}
+    <a href="{{ url_for('configuracion') }}" class="{{ 'on' if request.endpoint=='configuracion' }}">Configuración</a>
+    <a href="{{ url_for('versiones') }}" class="{{ 'on' if request.endpoint=='versiones' }}">Versiones</a>
+    <a href="{{ url_for('auditoria') }}" class="{{ 'on' if request.endpoint=='auditoria' }}">Auditoría</a>
+    {% endif %}
+  </nav>
+  <div class="who">
+    {{ current_user.name }} ·
+    V{{ version.number }} <span class="tag {{ 'ok' if version.status.value=='APPROVED' else 'na' }}">{{ version.status.value }}</span>
+    · <a href="{{ url_for('logout') }}">cambiar usuario</a>
+  </div>
+  {% endif %}
+</div></header>
+<div class="wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</div>
+</body>
+</html>

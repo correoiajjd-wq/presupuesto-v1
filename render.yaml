@@ -1,0 +1,16 @@
+# Deploy en Render: conectar este repositorio y confirmar.
+# El plan gratuito alcanza de sobra para el prototipo.
+services:
+  - type: web
+    name: presupuesto-v1
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    # Un solo worker: el estado del presupuesto vive en memoria.
+    startCommand: gunicorn wsgi:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: SECRET_KEY
+        generateValue: true

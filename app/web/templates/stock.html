@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block title %}Stock{% endblock %}
+{% block body %}
+<h1>Stock por familia</h1>
+<p class="sub">Stock final = stock anterior + compras − costo de venta. Nunca se carga a mano.
+El costo de venta de cada familia se consolida automáticamente desde los productos que la integran.</p>
+<div class="panel"><table>
+<thead><tr><th>Ámbito</th><th>Familia</th><th>Inicial</th><th>Compras</th>
+<th>Costo de venta</th><th>Final</th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td>{{ r.scope }}</td><td>{{ r.family }}</td><td>{{ r.opening|money }}</td>
+<td>{{ r.purchases|money }}</td><td>{{ r.cogs|money }}</td><td>{{ r.closing|money }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endblock %}

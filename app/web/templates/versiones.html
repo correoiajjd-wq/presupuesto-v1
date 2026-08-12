@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% block title %}Versiones{% endblock %}
+{% block body %}
+<h1>Versiones</h1>
+<p class="sub">Una versión aprobada es inmutable: para cambiar algo hay que crear una nueva,
+que parte de la anterior. Nada se sobrescribe y la vigente es un puntero, no un estado.</p>
+
+<div class="panel"><table>
+<thead><tr><th>Versión</th><th>Estado</th><th>Creada</th><th>Vigente</th><th></th></tr></thead><tbody>
+{% for v in budget.versions.values()|sort(attribute='number') %}
+<tr>
+  <td>V{{ v.number }}{% if v.source_version_id %} <span class="small">(desde una anterior)</span>{% endif %}</td>
+  <td>{% if v.status.value=='APPROVED' %}<span class="tag ok">aprobada</span>
+      {% else %}<span class="tag na">{{ v.status.value|lower }}</span>{% endif %}</td>
+  <td class="small">{{ v.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
+  <td>{% if budget.current_version_id == v.id %}<span class="tag ok">vigente</span>{% endif %}</td>
+  <td><form method="post" action="{{ url_for('seleccionar_version') }}">
+      <input type="hidden" name="version_id" value="{{ v.id }}">
+      <button class="ghost" style="padding:3px 10px">
+        {{ 'Viendo' if version.id == v.id else 'Ver' }}</button></form></td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+
+<h2>Acciones sobre V{{ version.number }}</h2>
+<div class="panel">
+  <p class="small">
+    {% if report.blocking %}{{ report.blocking|length }} validaciones bloqueantes ·{% endif %}
+    {{ report.pending_tasks|length }} tareas sin aprobar ·
+    {{ report.alerts|length }} alertas informativas (no bloquean).
+  </p>
+  <div class="row" style="margin-top:12px">
+    {% if report.pending_tasks %}
+    <form method="post" action="{{ url_for('aprobar_todo') }}">
+      <button class="ghost">Aprobar todas las tareas (atajo de demo)</button></form>
+    {% endif %}
+    <form method="post" action="{{ url_for('aprobar_version') }}"><button>Aprobar versión</button></form>
+    <form method="post" action="{{ url_for('vigente') }}"><button class="ghost">Definir como vigente</button></form>
+    <form method="post" action="{{ url_for('nueva_version') }}"><button class="ghost">Crear nueva versión</button></form>
+  </div>
+  <p class="small" style="margin-top:12px">Probá esto: aprobá la versión y después intentá
+  cargar cualquier dato o cambiar un tipo de cambio. El sistema responde VERSION_IMMUTABLE.</p>
+</div>
+{% endblock %}

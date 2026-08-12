@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block title %}Mis tareas{% endblock %}
+{% block body %}
+<h1>{{ 'Mis tareas' if mine else 'Tareas' }}</h1>
+<p class="sub">Qué tenés que cargar, en qué estado está y qué sigue después. Sólo aparecen
+las tareas de tu rol y de las unidades sobre las que tenés alcance.</p>
+<div class="panel"><table>
+<thead><tr><th>Tarea</th><th>Ámbito</th><th>Estado</th><th></th></tr></thead><tbody>
+{% for t in tasks %}
+<tr>
+  <td><a href="{{ url_for('carga', task_id=t.id) }}">{{ t.label }}</a></td>
+  <td class="small">{{ t.scope_key }}</td>
+  <td>{% if t.status.value == 'APPROVED' %}<span class="tag ok">aprobada</span>
+  {% elif t.status.value == 'IN_REVIEW' %}<span class="tag warn">en revisión</span>
+  {% elif t.status.value == 'REJECTED' %}<span class="tag bad">rechazada</span>
+  {% else %}<span class="tag na">{{ t.status.value|lower }}</span>{% endif %}</td>
+  <td><a href="{{ url_for('carga', task_id=t.id) }}">abrir</a></td>
+</tr>
+{% else %}
+<tr><td colspan="4" class="small">No tenés tareas asignadas con este rol.</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endblock %}

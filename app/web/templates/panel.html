@@ -1,0 +1,73 @@
+{% extends "base.html" %}{% block title %}Panel del CFO{% endblock %}
+{% block body %}
+<h1>Panel del CFO</h1>
+<p class="sub">Estado del presupuesto {{ budget.name }} — versión V{{ version.number }},
+configuración {{ version.configuration.status.value }}.</p>
+
+<div class="kpis">
+{% for label, v in kpis %}
+  <div class="kpi"><div class="l">{{ label }}</div><div class="v">{{ v|money }}</div></div>
+{% endfor %}
+  <div class="kpi"><div class="l">EBITDA %</div><div class="v">
+    {% set r = values.get(nk('RATIO:EBITDA_MARGIN_PCT', scope_co(), FY)) %}
+    {{ ((r*100)|round(1)) ~ '%' if r else '—' }}</div></div>
+</div>
+
+<div class="grid2">
+  <div>
+    <h2>Progreso de carga y aprobación</h2>
+    <div class="panel"><table>
+      <thead><tr><th>Tarea</th><th>Responsable</th><th>Estado</th><th></th></tr></thead><tbody>
+      {% for t in tasks %}
+      <tr>
+        <td><a href="{{ url_for('carga', task_id=t.id) }}">{{ t.label }}</a></td>
+        <td class="small">{{ t.loader_role.value }}</td>
+        <td>
+          {% if t.status.value == 'APPROVED' %}<span class="tag ok">aprobada</span>
+          {% elif t.status.value == 'IN_REVIEW' %}<span class="tag warn">en revisión</span>
+          {% elif t.status.value == 'REJECTED' %}<span class="tag bad">rechazada</span>
+          {% else %}<span class="tag na">{{ t.status.value|lower }}</span>{% endif %}
+        </td>
+        <td>
+          {% if t.status.value == 'IN_REVIEW' %}
+          <form method="post" action="{{ url_for('aprobar', task_id=t.id) }}" style="display:inline">
+            <button style="padding:3px 10px">Aprobar</button></form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody></table></div>
+  </div>
+  <div>
+    <h2>Configuración</h2>
+    <div class="panel"><table>
+      <thead><tr><th>Módulo</th><th>Estado</th></tr></thead><tbody>
+      {% for row in checklist %}
+      <tr><td>{{ row.module }} <span class="small">{{ row.detail }}</span></td>
+      <td>{% if row.status == 'Completo' %}<span class="tag ok">completo</span>
+      {% else %}<span class="tag na">no configurado</span>{% endif %}</td></tr>
+      {% endfor %}
+      </tbody></table></div>
+  </div>
+</div>
+
+<h2>Qué falta para poder aprobar</h2>
+<div class="panel">
+  {% if report.blocking %}
+    <p class="small">{{ report.blocking|length }} validaciones bloqueantes:</p>
+    <ul>{% for f in report.blocking[:12] %}<li>{{ f.message }}</li>{% endfor %}</ul>
+  {% else %}
+    <p class="small">Ninguna validación bloqueante. {% if report.pending_tasks %}
+    Faltan {{ report.pending_tasks|length }} tareas por aprobar.{% else %}
+    La versión está lista para aprobarse.{% endif %}</p>
+  {% endif %}
+  {% if report.alerts %}
+  <h3>Alertas informativas ({{ report.alerts|length }}) — no bloquean</h3>
+  <ul>{% for a in report.alerts[:8] %}<li>{{ a.message }}</li>{% endfor %}</ul>
+  {% endif %}
+  <p class="row" style="margin-top:14px">
+    <a class="btn ghost" href="{{ url_for('alertas') }}">Ver alertas y supuestos</a>
+    <a class="btn ghost" href="{{ url_for('versiones') }}">Aprobar versión</a>
+  </p>
+</div>
+{% endblock %}

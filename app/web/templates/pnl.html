@@ -1,0 +1,51 @@
+{% extends "base.html" %}{% block title %}P&L{% endblock %}
+{% block body %}
+<h1>Estado de resultados</h1>
+<p class="sub">Hasta EBITDA, en {{ version.configuration.presentation_currency }}. Los gastos
+corporativos de empresa y de las áreas de soporte se muestran asignados por debajo del EBITDA
+propio: arriba está el resultado que genera la unidad, abajo el impacto de la estructura.</p>
+
+<div class="panel row">
+  <form method="get" class="row">
+    <select name="scope" onchange="this.form.submit()" style="width:auto">
+      {% for key, name, level in scopes %}
+      <option value="{{ key }}" {{ 'selected' if key==scope }}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <input type="hidden" name="mode" value="{{ mode }}">
+  </form>
+  <a class="btn ghost" href="{{ url_for('pnl', scope=scope, mode='annual' if mode!='annual' else 'monthly') }}">
+    {{ 'Ver mensual' if mode == 'annual' else 'Ver anual' }}</a>
+</div>
+
+{% if mode == 'annual' %}
+<div class="panel"><table>
+<thead><tr><th>{{ label }}</th><th>Ejercicio</th></tr></thead><tbody>
+{% for r in rows %}
+<tr class="{{ 'total' if r.subtotal }}"><td>{{ r.label }}</td><td>{{ r.display|money }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% else %}
+<div class="panel" style="overflow-x:auto"><table>
+<thead><tr><th>{{ label }}</th>
+{% for p in table.periods %}<th>{{ p[5:] }}</th>{% endfor %}<th>Total</th></tr></thead><tbody>
+{% for metric, line in table.lines.items() %}
+<tr class="{{ 'total' if line.subtotal }}"><td>{{ line.label }}</td>
+{% for v in line.periods %}<td>{{ v|money }}</td>{% endfor %}
+<td>{{ line.total|money }}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endif %}
+
+<h2>Dotación</h2>
+<div class="panel row" style="gap:34px">
+  <div><div class="small">Inicial</div><div style="font-size:19px">{{ headcount.initial|money }}</div></div>
+  <div><div class="small">Final</div><div style="font-size:19px">{{ headcount.final|money }}</div></div>
+  <div><div class="small">Variación</div><div style="font-size:19px">{{ headcount.net_change|money }}</div></div>
+  <div><div class="small">Costo laboral del ejercicio</div>
+       <div style="font-size:19px">{{ headcount.payroll_cost|money }}</div></div>
+</div>
+
+<p class="small"><a href="{{ url_for('explicar', key='EBITDA|' ~ scope ~ '|FY') }}">
+Ver de dónde sale el EBITDA de este ámbito →</a></p>
+{% endblock %}

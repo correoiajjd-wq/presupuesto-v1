@@ -1,0 +1,4 @@
+pydantic>=2
+flask>=3
+openpyxl>=3.1
+gunicorn>=21
