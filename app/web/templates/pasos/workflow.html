@@ -1,0 +1,71 @@
+<div class="panel">
+<form method="post" action="{{ url_for('configurar_accion', step='workflow', action='workflow') }}">
+<table><thead><tr><th>Concepto</th><th>Carga</th><th>Revisa</th><th>Aprueba</th></tr></thead><tbody>
+{% for concept, label in workflow_concepts %}
+{% set s = cfg.workflow.step(concept) %}
+<tr>
+  <td>{{ label }}</td>
+  {% for field, current in [('loader', s.loader_role.value if s else ''),
+                            ('reviewer', s.reviewer_role.value if s else ''),
+                            ('approver', s.approver_role.value if s else '')] %}
+  <td><select name="{{ field }}_{{ concept }}" {{ 'disabled' if not editable }}>
+    <option value="">— no usar —</option>
+    {% for r in roles %}<option value="{{ r }}" {{ 'selected' if current==r }}>{{ r }}</option>{% endfor %}
+  </select></td>
+  {% endfor %}
+</tr>
+{% endfor %}
+</tbody></table>
+{% if editable %}
+<div class="row" style="margin-top:14px"><button>Guardar workflow</button>
+  <span class="small">Si dejás "no usar" en quién carga, ese concepto no genera tareas.</span></div>
+{% endif %}
+</form>
+</div>
+{% if editable %}
+<form method="post" action="{{ url_for('configurar_accion', step='workflow', action='workflow_default') }}">
+  <button class="ghost">Usar el circuito típico</button></form>
+{% endif %}
+<p class="small" style="margin-top:14px">Tener permiso no alcanza para poder actuar: el sistema
+combina la capacidad del usuario con el estado de la tarea. Alguien con permiso de aprobar no
+puede aprobar algo que todavía está en borrador.</p>
+
+<h3>Responsables</h3>
+<div class="panel">
+<p class="small">El workflow dice qué rol hace cada cosa; acá se dice quién es quién. El alcance
+es lo que hace que un gerente de sucursal no pueda tocar otra: tener el permiso no alcanza si
+la unidad no está dentro de su alcance.</p>
+<table><thead><tr><th>Persona</th><th>Roles</th><th>Alcance</th><th></th></tr></thead><tbody>
+{% for u in users %}
+<tr>
+  <td>{{ u.name }} <span class="small">{{ u.id }}</span></td>
+  <td class="small">{{ u.roles|map(attribute='value')|join(', ') }}</td>
+  <td class="small">{{ u.scopes|join(', ') if u.scopes else 'transversal' }}</td>
+  <td>{% if editable %}
+    <form method="post" action="{{ url_for('configurar_accion', step='workflow', action='borrar_usuario') }}">
+      <input type="hidden" name="user_id" value="{{ u.id }}">
+      <button class="ghost" style="padding:2px 9px">quitar</button></form>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table>
+
+{% if editable %}
+<form method="post" action="{{ url_for('configurar_accion', step='workflow', action='usuario') }}"
+      style="margin-top:14px">
+  <div class="row">
+    <div style="flex:2"><label class="small">Nombre</label>
+      <input type="text" name="name" required placeholder="Nombre y apellido"></div>
+    <div style="flex:1"><label class="small">Roles (podés elegir varios)</label>
+      <select name="role" multiple size="5">
+        {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select></div>
+    <div style="flex:2"><label class="small">Alcance (vacío = toda la empresa)</label>
+      <select name="scope" multiple size="5">
+        {% for key, label in scope_options %}
+        <option value="{{ key }}">{{ label }}</option>{% endfor %}
+      </select></div>
+  </div>
+  <button style="margin-top:10px">Agregar persona</button>
+</form>
+{% endif %}
+</div>

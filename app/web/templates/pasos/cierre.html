@@ -1,0 +1,48 @@
+<div class="panel">
+{% if cfg.status.value == 'LOCKED' %}
+  <p><span class="tag ok">configuración cerrada</span></p>
+  <p class="small">Ya se generaron las tareas de carga. La estructura quedó bloqueada:
+  productos, familias, fórmulas, monedas y responsables no se pueden cambiar dentro de esta
+  versión.</p>
+  <a class="btn" href="{{ url_for('panel') }}">Ir al panel</a>
+{% else %}
+  <h3>Qué falta</h3>
+  {% set blocking = findings|selectattr('blocking')|list %}
+  {% if blocking %}
+    <p class="small">{{ blocking|length }} cosas impiden cerrar la configuración:</p>
+    <ul>{% for f in blocking %}<li>{{ f.message }}</li>{% endfor %}</ul>
+  {% else %}
+    <p class="small">No hay errores estructurales. Se puede cerrar.</p>
+  {% endif %}
+
+  <h3>Qué va a pasar cuando cierres</h3>
+  <ul>
+    <li>Se generan las tareas de carga según el workflow, y cada responsable ve las suyas.</li>
+    <li>Se calcula qué datos son obligatorios: sale del modelo, no de una lista fija.</li>
+    <li>La estructura queda bloqueada. Cambiarla exige crear una versión nueva.</li>
+  </ul>
+
+  {% if editable %}
+  <form method="post" action="{{ url_for('cerrar_configuracion') }}" style="margin-top:16px">
+    <button {{ 'disabled' if blocking }}>Cerrar configuración</button>
+    {% if blocking %}<span class="small">Resolvé lo de arriba para poder cerrar.</span>{% endif %}
+  </form>
+  {% endif %}
+{% endif %}
+</div>
+
+<h3>Resumen del modelo</h3>
+<div class="panel"><table><tbody>
+<tr><td>Empresa</td><td>{{ cfg.company_name }}</td></tr>
+<tr><td>Ejercicio</td><td>{{ cfg.fiscal_year_start }} a {{ cfg.fiscal_year_end }}
+  ({{ cfg.periods|length }} períodos)</td></tr>
+<tr><td>Monedas</td><td>{{ cfg.enabled_currencies|join(', ') }} · presenta en {{ cfg.presentation_currency }}</td></tr>
+<tr><td>Unidades / sucursales</td><td>{{ cfg.business_units|length }} / {{ cfg.all_branches()|length }}</td></tr>
+<tr><td>Productos / familias</td>
+  <td>{{ cfg.business_units|map(attribute='products')|map('length')|sum }} /
+      {{ cfg.business_units|map(attribute='families')|map('length')|sum }}</td></tr>
+<tr><td>Gastos</td><td>{{ cfg.expenses|length }}</td></tr>
+<tr><td>Áreas de nómina</td><td>{{ cfg.payroll.areas|length }}</td></tr>
+<tr><td>Ratios</td><td>{{ cfg.ratios|length }}</td></tr>
+<tr><td>Conceptos que va a exigir</td><td>{{ cfg.required_concepts()|sort|join(', ')|lower }}</td></tr>
+</tbody></table></div>

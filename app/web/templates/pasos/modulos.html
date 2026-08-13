@@ -1,0 +1,102 @@
+<div class="panel">
+<form method="post" action="{{ url_for('configurar_accion', step='modulos', action='modulos') }}">
+  <h3>CAPEX</h3>
+  <label><input type="checkbox" name="capex_enabled" value="1" style="width:auto"
+    {{ 'checked' if cfg.capex.enabled }} {{ 'disabled' if not editable }}> Usar CAPEX</label>
+  <p class="small">En V1 se carga la inversión y el período. No hay depreciación, vida útil ni
+  valor residual: eso queda para V2.</p>
+
+  <h3>Stock</h3>
+  <label><input type="checkbox" name="inventory_enabled" value="1" style="width:auto"
+    {{ 'checked' if cfg.inventory.enabled }} {{ 'disabled' if not editable }}> Usar stock</label>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:1"><label class="small">Nivel de carga</label>
+      <select name="inventory_level" {{ 'disabled' if not editable }}>
+        {% for lvl, lbl in [('COMPANY','Empresa'),('BUSINESS_UNIT','Unidad de negocio'),('BRANCH','Sucursal')] %}
+        <option value="{{ lvl }}" {{ 'selected' if cfg.inventory.level.value==lvl }}>{{ lbl }}</option>{% endfor %}
+      </select></div>
+    <div style="flex:1"><label class="small">Frecuencia de compras</label>
+      <select name="inventory_frequency" {{ 'disabled' if not editable }}>
+        {% for f in ['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'] %}
+        <option value="{{ f }}" {{ 'selected' if cfg.inventory.frequency.value==f }}>{{ f|lower }}</option>{% endfor %}
+      </select></div>
+    <div style="flex:1"><label class="small">Moneda</label>
+      <select name="inventory_currency" {{ 'disabled' if not editable }}>
+        {% for c in cfg.enabled_currencies %}
+        <option {{ 'selected' if cfg.inventory.currency==c }}>{{ c }}</option>{% endfor %}</select></div>
+    <div style="align-self:end"><label><input type="checkbox" name="purchases_enabled" value="1"
+      style="width:auto" {{ 'checked' if cfg.inventory.purchases_enabled }}
+      {{ 'disabled' if not editable }}> Usar compras</label></div>
+  </div>
+  <p class="small">El stock se administra por familia. El stock final siempre se calcula
+  (stock anterior + compras − costo de venta) y no se puede cargar. Stock y compras usan
+  obligatoriamente la misma moneda.</p>
+
+  <h3>Balance</h3>
+  <label><input type="checkbox" name="balance_enabled" value="1" style="width:auto"
+    {{ 'checked' if cfg.balance.enabled }} {{ 'disabled' if not editable }}> Usar balance</label>
+  <div style="margin-top:10px;max-width:220px"><label class="small">Moneda del balance</label>
+    <select name="balance_currency" {{ 'disabled' if not editable }}>
+      {% for c in cfg.enabled_currencies %}
+      <option {{ 'selected' if cfg.balance.currency==c }}>{{ c }}</option>{% endfor %}</select></div>
+  <p class="small">El balance inicial corresponde automáticamente al
+  {{ cfg.fiscal_year.opening_balance_date }}. En V1 el P&amp;L y el balance son módulos
+  independientes: no hay conciliación automática, porque todavía no existen amortizaciones,
+  intereses ni impuestos.</p>
+
+  {% if editable %}<div style="margin-top:14px"><button>Guardar módulos</button></div>{% endif %}
+</form>
+</div>
+
+{% if cfg.capex.enabled %}
+<h3>Categorías de CAPEX</h3>
+<div class="panel">
+<table><tbody>
+{% for c in cfg.capex.categories %}
+<tr><td>{{ c.name }}</td><td style="text-align:right">{% if editable %}<form method="post"
+  action="{{ url_for('configurar_borrar', step='modulos', kind='capex_category', entity_id=c.id) }}">
+  <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
+{% else %}<tr><td class="small">Sin categorías.</td></tr>{% endfor %}
+</tbody></table>
+{% if editable %}
+<form method="post" action="{{ url_for('configurar_accion', step='modulos', action='capex_categoria') }}"
+      class="row" style="margin-top:12px">
+  <input type="text" name="name" placeholder="Maquinaria, Tecnología..." required style="width:240px">
+  <button class="ghost">Agregar categoría</button></form>
+{% endif %}
+</div>
+{% endif %}
+
+{% if cfg.balance.enabled %}
+<h3>Rubros del balance</h3>
+<div class="panel">
+<table><thead><tr><th>Rubro</th><th>Sección</th><th>Origen</th><th></th></tr></thead><tbody>
+{% for i in cfg.balance.items %}
+<tr><td>{{ i.name }}</td>
+  <td class="small">{{ {'ASSET':'Activo','LIABILITY':'Pasivo','EQUITY':'Patrimonio'}[i.section.value] }}
+    {{ 'corriente' if i.current else 'no corriente' }}</td>
+  <td class="small">{{ 'se carga' if i.source.value=='MANUAL' else 'calculado' }}</td>
+  <td>{% if editable %}<form method="post"
+      action="{{ url_for('configurar_borrar', step='modulos', kind='balance_item', entity_id=i.id) }}">
+      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
+{% else %}<tr><td colspan="4" class="small">Sin rubros.</td></tr>{% endfor %}
+</tbody></table>
+{% if editable %}
+<div class="row" style="margin-top:12px">
+  <form method="post" action="{{ url_for('configurar_accion', step='modulos', action='rubro') }}" class="row">
+    <input type="text" name="name" placeholder="Nombre del rubro" required style="width:220px">
+    <select name="section" style="width:auto"><option value="ASSET">Activo</option>
+      <option value="LIABILITY">Pasivo</option><option value="EQUITY">Patrimonio</option></select>
+    <select name="current" style="width:auto"><option value="1">Corriente</option>
+      <option value="0">No corriente</option></select>
+    <button class="ghost">Agregar rubro</button>
+  </form>
+  <form method="post" action="{{ url_for('configurar_accion', step='modulos', action='rubros_default') }}">
+    <button class="ghost">Usar rubros típicos</button></form>
+</div>
+{% endif %}
+<p class="small">El total del patrimonio siempre es calculado (activo − pasivo). Los componentes
+(capital, resultados acumulados) sí se cargan: si no coinciden con ese total, el balance no
+cierra y la carga se rechaza entera.</p>
+</div>
+{% endif %}

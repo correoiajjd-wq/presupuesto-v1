@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% block title %}Nuevo presupuesto{% endblock %}
+{% block body %}
+<h1>Nuevo presupuesto</h1>
+<p class="sub">Esto es lo primero que hace el CFO. El ejercicio puede empezar y terminar en
+cualquier fecha: el sistema arma los períodos, las cargas y los reportes en función de eso.</p>
+<div class="panel" style="max-width:620px">
+<form method="post">
+  <h3>Presupuesto</h3>
+  <label class="small">Nombre</label>
+  <input type="text" name="name" required placeholder="Presupuesto 2027" style="margin-bottom:12px">
+
+  <label class="small">Empresa</label>
+  <input type="text" name="company_name" required placeholder="ACME S.A." style="margin-bottom:12px">
+
+  <h3>Ejercicio</h3>
+  <div class="row" style="margin-bottom:12px">
+    <div style="flex:1"><label class="small">Inicio</label>
+      <input type="date" name="fiscal_year_start" required value="2027-01-01"></div>
+    <div style="flex:1"><label class="small">Fin</label>
+      <input type="date" name="fiscal_year_end" required value="2027-12-31"></div>
+  </div>
+
+  <h3>Monedas</h3>
+  <label class="small">Moneda de presentación</label>
+  <input type="text" name="presentation_currency" required value="USD" maxlength="3"
+         style="margin-bottom:12px;text-transform:uppercase">
+  <label class="small">Monedas habilitadas, separadas por coma</label>
+  <input type="text" name="currencies" value="USD, UYU" placeholder="USD, UYU, ARS"
+         style="margin-bottom:6px;text-transform:uppercase">
+  <p class="small">La de presentación funciona como moneda puente: con USD de presentación,
+  ARS→UYU se resuelve sin cargar ese par. No se puede usar una moneda que no esté acá.</p>
+
+  <div style="margin-top:16px"><button>Crear y configurar</button></div>
+</form>
+</div>
+{% endblock %}

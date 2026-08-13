@@ -4,12 +4,12 @@ Implementación funcionando de la parte que decide si el sistema sirve o no:
 **configuración → inputs → grafo de dependencias → cálculo → validación → workflow → versión**.
 
 No es el producto terminado. Es el motor, con la cadena completa andando de punta a punta
-sobre una empresa demo, y 74 tests que verifican reglas concretas del spec.
+sobre una empresa demo, y 84 tests que verifican reglas concretas del spec.
 
 ```
 PYTHONPATH=. python3 wsgi.py                           # interfaz web en :8000
 PYTHONPATH=. python3 run_demo.py --html reporte.html   # recorrido end-to-end por consola
-PYTHONPATH=. python3 -m unittest discover -s tests     # 74 tests
+PYTHONPATH=. python3 -m unittest discover -s tests     # 84 tests
 ```
 
 ---
@@ -33,6 +33,7 @@ PYTHONPATH=. python3 -m unittest discover -s tests     # 74 tests
 | Reporting / read models | ✔ | `app/services/reporting.py` |
 | API REST | ✔ | `app/api/main.py` |
 | Interfaz web (server-rendered) | ✔ | `app/web/` |
+| Wizard de configuración (CFO / COO) | ✔ | `app/web/wizard.py` |
 | Persistencia | parcial | `app/services/repository.py` + `schema_postgres.sql` |
 | Identity, notificaciones, job engine, cache | ✖ | pendiente |
 
@@ -174,11 +175,40 @@ pip install -r requirements.txt
 PYTHONPATH=. python3 wsgi.py        # web en / y API en /api
 ```
 
+### Armar una empresa desde cero
+
+Es lo primero que pasa en la vida real, y está implementado: **Presupuestos → Crear un
+presupuesto nuevo** (como CFO). El wizard tiene nueve pasos, se puede hacer en varias
+sesiones y entre varias personas, y cada paso dice de quién es:
+
+1. **Datos generales** — empresa, ejercicio (cualquier fecha de inicio y fin), monedas
+   habilitadas y tipos de cambio. El TC se guarda día por día; para no cargar 365 valores
+   se pide el estimado de inicio y el de cierre, y el sistema interpola.
+2. **Estructura** — unidades de negocio, sucursales, unidades de soporte y centros de costo,
+   cada uno con su fecha de apertura y cierre dentro del ejercicio.
+3. **Productos y familias** — lo define el **COO**: catálogo por unidad, modalidad de venta
+   (por unidades o por monto), fórmula de margen, precio, margen y frecuencia de carga.
+4. **Gastos** — qué existe, dónde se imputa, con qué frecuencia y moneda, y si se reparte.
+5. **Nómina** — áreas con su sueldo base, reglas de aumento y conceptos porcentuales.
+6. **CAPEX, Stock y Balance** — módulos opcionales. Lo que no se configura, no se pide.
+7. **Ratios y objetivos** — se eligen del catálogo de 23; cada uno arrastra sus dependencias.
+8. **Workflow y responsables** — quién carga, quién revisa y quién aprueba cada concepto, y
+   qué persona ocupa cada rol con qué alcance.
+9. **Validación y cierre** — muestra qué falta y, cuando no queda nada bloqueante, cierra.
+
+Al cerrar pasan tres cosas: se generan las tareas de carga y cada responsable ve las suyas,
+el sistema deriva qué datos son obligatorios (sale del modelo, no de una lista fija), y la
+estructura queda bloqueada — cambiarla exige una versión nueva.
+
+El panel de carga directamente no existe antes del cierre: entrar a `/` con la configuración
+en borrador redirige al wizard.
+
 ### Qué se puede hacer en la interfaz
 
 | Pantalla | Qué probar |
 |---|---|
 | **Ingreso** | Elegís rol: CFO, COO, gerente de sucursal, administración, nómina, finanzas. Cada uno ve algo distinto. |
+| **Configurar** | El wizard de nueve pasos. Los pasos del COO no los puede editar otro rol, y viceversa. |
 | **Panel del CFO** | Progreso de carga y aprobación, checklist de configuración, qué falta para poder aprobar, alertas. |
 | **Mis tareas** | Un gerente sólo ve sus tareas y sus sucursales. Si intenta entrar a otra, el sistema lo frena. |
 | **Carga** | El formulario se genera desde la configuración: sólo tus productos, tus períodos, tu moneda. El precio y el margen se muestran pero no se editan. Guardás borrador o enviás a revisión. |
@@ -192,6 +222,11 @@ PYTHONPATH=. python3 wsgi.py        # web en / y API en /api
 
 ### Cosas que vale la pena intentar romper
 
+- Armá una empresa desde cero con el wizard, asignale un gerente a una sola sucursal, cerrá
+  la configuración y entrá con ese usuario: sólo ve sus tareas, y si intenta cargar otra
+  sucursal el sistema responde `UNAUTHORIZED_SCOPE`.
+- Intentá cerrar la configuración con una moneda habilitada sin tipo de cambio: no te deja.
+- Cargá dos productos "Otros" en la misma unidad, o una distribución de gasto que sume 90%.
 - Entrá como **Martín (gerente Montevideo)** y fijate que no existe la sucursal Salto para él.
 - En **Ventas**, dejá una celda vacía y guardá: pasa. Ahora bajá la planilla Excel, dejá una
   celda vacía y subila: la rechaza entera, porque en carga masiva vacío es error.

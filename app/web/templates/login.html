@@ -13,6 +13,8 @@ border-radius:9px;padding:12px 14px;margin-bottom:8px;cursor:pointer;font:inheri
 <p>Prototipo V1 sobre la empresa demo. Elegí con qué rol querés entrar: cada uno ve
 cosas distintas. El CFO gobierna el modelo y aprueba; los responsables sólo ven sus tareas
 y sus propias unidades.</p>
+<p style="color:#c9a227">Para armar una empresa desde cero — que es lo primero que hacen el
+CFO y el COO — entrá como CFO y andá a <b>Presupuestos → Crear un presupuesto nuevo</b>.</p>
 {% for u in users %}
 <form method="post" action="{{ url_for('do_login') }}">
   <input type="hidden" name="user_id" value="{{ u.id }}">

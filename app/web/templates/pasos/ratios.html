@@ -1,0 +1,43 @@
+<div class="panel">
+<form method="post" action="{{ url_for('configurar_accion', step='ratios', action='ratios') }}">
+{% set selected = {} %}
+{% for r in cfg.ratios %}{% set _ = selected.update({r.ratio_code: r}) %}{% endfor %}
+{% set groups = {'PROFITABILITY':'Rentabilidad','STRUCTURE':'Estructura y asignación',
+                 'PRODUCTIVITY':'Productividad','INVENTORY':'Inventario',
+                 'INVESTMENT':'Inversión','BALANCE':'Balance'} %}
+{% for gkey, gname in groups.items() %}
+<h3>{{ gname }}</h3>
+<table><thead><tr><th style="width:32px"></th><th>Ratio</th><th>Fórmula</th>
+  <th>Necesita</th><th>Objetivo</th></tr></thead><tbody>
+{% for code, r in catalog.items() if r.group.value == gkey %}
+<tr>
+  <td><input type="checkbox" name="ratio" value="{{ code }}" style="width:auto"
+      {{ 'checked' if code in selected }} {{ 'disabled' if not editable }}></td>
+  <td>{{ r.name }}{% if r.notes %}<br><span class="small">{{ r.notes }}</span>{% endif %}</td>
+  <td class="small">{{ r.formula_text }}</td>
+  <td class="small">{{ r.required_inputs|join(', ')|lower }}</td>
+  <td>
+    <div class="row" style="justify-content:flex-end;flex-wrap:nowrap">
+      <select name="objective_type_{{ code }}" style="width:auto" {{ 'disabled' if not editable }}>
+        <option value="MINIMUM" {{ 'selected' if selected.get(code) and selected[code].objective and selected[code].objective.type.value=='MINIMUM' }}>mín</option>
+        <option value="MAXIMUM" {{ 'selected' if selected.get(code) and selected[code].objective and selected[code].objective.type.value=='MAXIMUM' }}>máx</option>
+      </select>
+      <input type="number" step="any" name="objective_{{ code }}" style="width:100px"
+        placeholder="{{ '%' if r.unit.value=='PERCENTAGE' else '' }}"
+        value="{% if selected.get(code) and selected[code].objective %}{{ (selected[code].objective.value*100)|round(2) if r.unit.value=='PERCENTAGE' else selected[code].objective.value }}{% endif %}"
+        {{ 'disabled' if not editable }}>
+    </div>
+  </td>
+</tr>
+{% endfor %}
+</tbody></table>
+{% endfor %}
+{% if editable %}
+<div class="sticky-actions"><button>Guardar ratios y objetivos</button>
+<span class="small">Los porcentajes se escriben como número: 15 significa 15%.</span></div>
+{% endif %}
+</form>
+</div>
+<p class="small">Elegir un ratio puede activar requerimientos: si seleccionás uno de stock,
+el sistema va a exigir que configures Stock y que se cargue el stock inicial. Un objetivo
+incumplido genera alerta pero nunca bloquea la aprobación.</p>

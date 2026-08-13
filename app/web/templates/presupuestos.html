@@ -1,0 +1,24 @@
+{% extends "base.html" %}{% block title %}Presupuestos{% endblock %}
+{% block body %}
+<h1>Presupuestos</h1>
+<p class="sub">Cada presupuesto es un ejercicio con sus versiones. Al crear el ejercicio
+siguiente conviene partir de la configuración del anterior: la expectativa es que sea
+mayoritariamente la misma.</p>
+<div class="panel"><table>
+<thead><tr><th>Presupuesto</th><th>Versiones</th><th>Configuración</th><th></th></tr></thead><tbody>
+{% for b in budgets %}
+<tr>
+  <td>{{ b.name }}</td>
+  <td>{{ b.versions|length }}</td>
+  <td>{% set c = b.latest.configuration.status.value %}
+      {% if c == 'LOCKED' %}<span class="tag ok">cerrada</span>
+      {% else %}<span class="tag warn">{{ c|lower }}</span>{% endif %}</td>
+  <td><form method="post" action="{{ url_for('seleccionar_presupuesto') }}">
+      <input type="hidden" name="budget_id" value="{{ b.id }}">
+      <button class="ghost" style="padding:3px 12px">
+        {{ 'En uso' if budget.id == b.id else 'Abrir' }}</button></form></td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+<a class="btn" href="{{ url_for('nuevo') }}">Crear un presupuesto nuevo</a>
+{% endblock %}

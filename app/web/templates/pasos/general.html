@@ -1,0 +1,49 @@
+<div class="panel">
+<form method="post" action="{{ url_for('configurar_accion', step='general', action='general') }}">
+  <div class="row">
+    <div style="flex:2"><label class="small">Empresa</label>
+      <input type="text" name="company_name" value="{{ cfg.company_name }}" {{ 'disabled' if not editable }}></div>
+    <div style="flex:1"><label class="small">Inicio del ejercicio</label>
+      <input type="date" name="fiscal_year_start" value="{{ cfg.fiscal_year_start }}" {{ 'disabled' if not editable }}></div>
+    <div style="flex:1"><label class="small">Fin</label>
+      <input type="date" name="fiscal_year_end" value="{{ cfg.fiscal_year_end }}" {{ 'disabled' if not editable }}></div>
+  </div>
+  <div style="margin-top:10px">
+    <label class="small">Monedas habilitadas (la de presentación es {{ cfg.presentation_currency }})</label>
+    <input type="text" name="currencies" value="{{ cfg.enabled_currencies|join(', ') }}" {{ 'disabled' if not editable }}>
+  </div>
+  {% if editable %}<div style="margin-top:12px"><button>Guardar</button></div>{% endif %}
+</form>
+</div>
+
+<h3>Tipos de cambio estimados</h3>
+<div class="panel">
+  <p class="small">El TC se guarda día por día para todo el ejercicio. Para no cargar 365 valores,
+  poné el estimado de inicio y, si esperás que se mueva, el de cierre: el sistema interpola
+  linealmente. Se expresa como cuántas unidades de esa moneda equivalen a 1
+  {{ cfg.presentation_currency }}.</p>
+  <table>
+  <thead><tr><th>Moneda</th><th>Inicio</th><th>Cierre</th><th>Estado</th></tr></thead><tbody>
+  {% for r in fx %}
+  <tr><td>{{ r.currency }}</td>
+    <td>{{ (r.start|round(4)) if r.start else '—' }}</td>
+    <td>{{ (r.end|round(4)) if r.end else '—' }}</td>
+    <td>{% if r.loaded %}<span class="tag ok">cargado</span>
+        {% else %}<span class="tag bad">falta</span>{% endif %}</td></tr>
+  {% else %}
+  <tr><td colspan="4" class="small">Sólo hay moneda de presentación: no hacen falta tipos de cambio.</td></tr>
+  {% endfor %}
+  </tbody></table>
+
+  {% if editable and fx %}
+  <form method="post" action="{{ url_for('configurar_accion', step='general', action='fx') }}"
+        class="row" style="margin-top:14px">
+    <select name="currency" style="width:auto">
+      {% for r in fx %}<option value="{{ r.currency }}">{{ r.currency }}</option>{% endfor %}
+    </select>
+    <input type="number" step="any" name="start_rate" placeholder="TC inicio" required style="width:150px">
+    <input type="number" step="any" name="end_rate" placeholder="TC cierre (opcional)" style="width:170px">
+    <button class="ghost">Cargar tipo de cambio</button>
+  </form>
+  {% endif %}
+</div>

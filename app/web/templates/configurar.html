@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% block title %}Configurar — {{ step.title }}{% endblock %}
+{% block body %}
+<h1>Configuración del modelo</h1>
+<p class="sub">La configuración es el contrato del modelo: define qué existe, quién carga,
+qué se calcula y qué se valida. Se puede hacer en varias sesiones y por varias personas.
+Hasta que no esté cerrada, nadie puede cargar datos.</p>
+
+<div class="grid2" style="grid-template-columns:260px 1fr;align-items:start">
+  <div class="panel" style="position:sticky;top:70px">
+    {% for s in steps %}
+    {% set st = state[s.key] %}
+    <a href="{{ url_for('configurar', step=s.key) }}"
+       style="display:block;padding:9px 10px;border-radius:8px;margin-bottom:2px;
+       {{ 'background:rgba(91,141,239,.12)' if s.key == step.key }}">
+      <span style="color:{{ 'var(--txt)' if s.key == step.key else 'var(--muted)' }};font-weight:{{ 600 if s.key==step.key else 400 }}">
+        {{ loop.index }}. {{ s.title }}</span>
+      {% if st.ready %}<span class="tag ok" style="float:right">listo</span>{% endif %}
+      <br><span class="small">{{ st.detail }}</span>
+    </a>
+    {% endfor %}
+  </div>
+
+  <div>
+    <h2 style="margin-top:0">{{ step.title }}
+      <span class="tag na" style="margin-left:8px">define {{ step.owner.value }}</span></h2>
+    <p class="sub">{{ step.blurb }}</p>
+    {% if not editable %}
+    <div class="flash error">
+      {% if cfg.status.value == 'LOCKED' %}
+        La configuración está cerrada: no se puede modificar. Para cambiar la estructura hay
+        que crear una versión nueva.
+      {% else %}
+        Este paso lo define {{ step.owner.value }}. Podés verlo, pero no editarlo con tu rol.
+      {% endif %}
+    </div>
+    {% endif %}
+    {% include "pasos/" ~ step.key ~ ".html" %}
+  </div>
+</div>
+{% endblock %}

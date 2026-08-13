@@ -66,8 +66,10 @@ padding:16px 0 0;margin-top:8px}
 <header><div class="hd">
   <span class="brand">{{ budget.name if budget else 'Presupuesto' }}</span>
   {% if current_user %}
+  {% set configurado = version.configuration.status.value == 'LOCKED' %}
   <nav>
     <a href="{{ url_for('panel') }}" class="{{ 'on' if request.endpoint=='panel' }}">Panel</a>
+    {% if configurado %}
     <a href="{{ url_for('tareas') }}" class="{{ 'on' if request.endpoint in ('tareas','carga') }}">Tareas</a>
     <a href="{{ url_for('pnl') }}" class="{{ 'on' if request.endpoint=='pnl' }}">P&amp;L</a>
     <a href="{{ url_for('ratios') }}" class="{{ 'on' if request.endpoint=='ratios' }}">Ratios</a>
@@ -75,8 +77,12 @@ padding:16px 0 0;margin-top:8px}
     <a href="{{ url_for('stock') }}" class="{{ 'on' if request.endpoint=='stock' }}">Stock</a>{% endif %}
     <a href="{{ url_for('escenarios') }}" class="{{ 'on' if request.endpoint=='escenarios' }}">Escenarios</a>
     <a href="{{ url_for('alertas') }}" class="{{ 'on' if request.endpoint=='alertas' }}">Alertas</a>
+    {% endif %}
+    {% if is_cfo or Role.COO in current_user.roles %}
+    <a href="{{ url_for('configurar') }}" class="{{ 'on' if request.endpoint=='configurar' }}">Configurar</a>
+    {% endif %}
     {% if is_cfo %}
-    <a href="{{ url_for('configuracion') }}" class="{{ 'on' if request.endpoint=='configuracion' }}">Configuración</a>
+    <a href="{{ url_for('presupuestos') }}" class="{{ 'on' if request.endpoint in ('presupuestos','nuevo') }}">Presupuestos</a>
     <a href="{{ url_for('versiones') }}" class="{{ 'on' if request.endpoint=='versiones' }}">Versiones</a>
     <a href="{{ url_for('auditoria') }}" class="{{ 'on' if request.endpoint=='auditoria' }}">Auditoría</a>
     {% endif %}

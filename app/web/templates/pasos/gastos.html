@@ -1,0 +1,87 @@
+<div class="panel">
+<table><thead><tr><th>Gasto</th><th>Imputación</th><th>Frecuencia</th><th>Responsable</th><th></th></tr></thead><tbody>
+{% for e in cfg.expenses %}
+<tr>
+  <td>{{ e.name }}</td>
+  <td class="small">
+    {% if e.level.value == 'DISTRIBUTED' %}
+      distribuido: {% for a in e.allocations %}{{ a.target_id }} {{ (a.percentage*100)|round }}%{% if not loop.last %}, {% endif %}{% endfor %}
+    {% elif e.level.value == 'COMPANY' %}empresa (corporativo)
+    {% else %}{{ e.level.value|lower }} {{ e.target_id }}{% endif %}
+    {% if e.distribute_to_branches %} · se reparte a sucursales por ventas{% endif %}
+  </td>
+  <td class="small">{{ e.frequency.value|lower }} · {{ e.currency }}</td>
+  <td class="small">{{ e.responsible_role.value }}</td>
+  <td>{% if editable %}<form method="post"
+      action="{{ url_for('configurar_borrar', step='gastos', kind='expense', entity_id=e.id) }}">
+      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="small">Sin gastos configurados.</td></tr>
+{% endfor %}
+</tbody></table>
+</div>
+
+{% if editable %}
+<div class="panel">
+  <h3>Agregar gasto</h3>
+  <form method="post" action="{{ url_for('configurar_accion', step='gastos', action='gasto') }}">
+    <div class="row">
+      <div style="flex:2"><label class="small">Nombre</label><input type="text" name="name" required></div>
+      <div style="flex:1"><label class="small">Se imputa a</label>
+        <select name="level" id="level" onchange="document.getElementById('dist').style.display=this.value==='DISTRIBUTED'?'block':'none';document.getElementById('tgt').style.display=(this.value==='COMPANY'||this.value==='DISTRIBUTED')?'none':'block'">
+          <option value="COMPANY">Empresa (corporativo)</option>
+          <option value="BUSINESS_UNIT">Una unidad de negocio</option>
+          <option value="BRANCH">Una sucursal</option>
+          <option value="COST_CENTER">Un centro de costo</option>
+          <option value="DISTRIBUTED">Varias unidades, por porcentaje</option>
+        </select></div>
+      <div style="flex:1"><label class="small">Moneda</label>
+        <select name="currency">{% for c in cfg.enabled_currencies %}<option>{{ c }}</option>{% endfor %}</select></div>
+      <div style="flex:1"><label class="small">Frecuencia</label>
+        <select name="frequency"><option value="MONTHLY">Mensual</option>
+          <option value="QUARTERLY">Trimestral</option><option value="SEMIANNUAL">Semestral</option>
+          <option value="ANNUAL">Anual</option></select></div>
+    </div>
+
+    <div id="tgt" style="display:none;margin-top:10px">
+      <label class="small">Ámbito</label>
+      <select name="target_id">
+        <optgroup label="Unidades de negocio">
+        {% for u in cfg.business_units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</optgroup>
+        <optgroup label="Sucursales">
+        {% for u in cfg.business_units %}{% for b in u.branches %}
+        <option value="{{ b.id }}">{{ u.name }} / {{ b.name }}</option>{% endfor %}{% endfor %}</optgroup>
+        <optgroup label="Centros de costo">
+        {% for s in cfg.support_units %}{% for c in s.cost_centers %}
+        <option value="{{ c.id }}">{{ s.name }} / {{ c.name }}</option>{% endfor %}{% endfor %}</optgroup>
+      </select>
+    </div>
+
+    <div id="dist" style="display:none;margin-top:10px">
+      <label class="small">Porcentaje por unidad (tiene que sumar 100)</label>
+      <div class="row">
+      {% for u in cfg.business_units %}
+        <div style="width:170px"><span class="small">{{ u.name }}</span>
+          <input type="number" step="any" name="alloc_{{ u.id }}" placeholder="0"></div>
+      {% endfor %}
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <div style="flex:1"><label class="small">Quién lo carga</label>
+        <select name="responsible_role">
+          <option value="ADMIN_AREA">Área administrativa</option>
+          <option value="FINANCE_AREA">Finanzas</option>
+          <option value="UNIT_MANAGER">Gerente de unidad</option></select></div>
+      <div style="align-self:end;flex:2"><label class="small">
+        <input type="checkbox" name="distribute_to_branches" value="1" style="width:auto">
+        Mostrarlo repartido entre las sucursales, proporcional a sus ventas anuales</label></div>
+    </div>
+    <p class="small" style="margin-top:8px">El nivel lo decidís vos acá: la persona que carga
+    el importe no elige dónde se imputa. Los gastos de empresa y de centros de costo se
+    muestran asignados por debajo del EBITDA de cada unidad, no dentro.</p>
+    <button style="margin-top:6px">Agregar gasto</button>
+  </form>
+</div>
+{% endif %}

@@ -15,15 +15,21 @@ from datetime import date
 from decimal import Decimal
 from io import BytesIO
 
+from pydantic import ValidationError
 from flask import (
     Flask, flash, redirect, render_template, request, send_file, session, url_for,
 )
 
-from ..domain.config import Role
+from ..domain.config import ConfigStatus, Role
 from ..domain.engine import FY, scope_br, scope_bu, scope_co, scope_su
 from ..domain.graph import nk
 from ..domain.inputs import Concept
+from ..domain.money import FXTable
+from ..domain.periods import Frequency
+from ..domain.ratios import RATIO_CATALOG
+from ..domain.validation import validate_configuration
 from ..services import reporting
+from . import wizard
 from ..services.budget import (
     BudgetError, BudgetService, Scenario, ScenarioAdjustment, TaskStatus, VersionStatus,
 )
@@ -38,14 +44,21 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
 
     # ------------------------------------------------------------ contexto
     def budget():
-        return service.budget(budget_id)
+        bid = session.get("budget_id") or budget_id
+        if bid not in service.budgets:
+            bid = budget_id
+        return service.budget(bid)
 
     def version():
-        b = budget()
+        """La versión elegida manda: si pertenece a otro presupuesto, se cambia también
+        el presupuesto activo. Presupuesto y versión nunca quedan desalineados."""
         vid = session.get("version_id")
-        if vid and vid in b.versions:
-            return b.versions[vid]
-        v = b.latest
+        if vid:
+            for bud in service.budgets.values():
+                if vid in bud.versions:
+                    session["budget_id"] = bud.id
+                    return bud.versions[vid]
+        v = budget().latest
         session["version_id"] = v.id
         return v
 
@@ -86,6 +99,18 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         flash(f"{err.code}: {err}{detail}", "error")
         return redirect(request.referrer or url_for("panel"))
 
+    @app.errorhandler(ValidationError)
+    def handle_model(err: ValidationError):
+        """Las reglas del dominio viven en el modelo: acá sólo se traducen a pantalla."""
+        msgs = [e.get("msg", "").replace("Value error, ", "") for e in err.errors()[:3]]
+        flash(" · ".join(m for m in msgs if m) or str(err), "error")
+        return redirect(request.referrer or url_for("panel"))
+
+    @app.errorhandler(ValueError)
+    def handle_value(err: ValueError):
+        flash(str(err), "error")
+        return redirect(request.referrer or url_for("panel"))
+
     @app.before_request
     def guard():
         allowed = {"login", "do_login", "static"}
@@ -111,6 +136,9 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.get("/")
     def panel():
         u, v = user(), version()
+        if v.configuration.status is not ConfigStatus.LOCKED:
+            # Doc 01 §5: no se puede empezar a cargar hasta cerrar la configuración.
+            return redirect(url_for("configurar"))
         tasks = service.tasks_for(v, u)
         if Role.CFO not in u.roles:
             return render_template("tareas.html", tasks=tasks, mine=True)
@@ -294,6 +322,106 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         run_scenario(v, sc)
         flash(f"Escenario '{sc.name}' calculado. El presupuesto base no cambió.", "ok")
         return redirect(url_for("escenarios"))
+
+    # ------------------------------------------------------------ presupuestos
+    @app.get("/presupuestos")
+    def presupuestos():
+        return render_template("presupuestos.html", budgets=list(service.budgets.values()))
+
+    @app.post("/presupuestos/seleccionar")
+    def seleccionar_presupuesto():
+        session["budget_id"] = request.form["budget_id"]
+        session.pop("version_id", None)
+        return redirect(url_for("panel"))
+
+    @app.get("/nuevo")
+    def nuevo():
+        return render_template("nuevo.html")
+
+    @app.post("/nuevo")
+    def crear_presupuesto():
+        cfg = wizard.new_configuration(request.form)
+        fx = FXTable(cfg.presentation_currency, cfg.enabled_currencies)
+        nb = service.create_budget(session["user_id"], request.form["name"].strip(), cfg, fx)
+        session["budget_id"] = nb.id
+        session["version_id"] = nb.latest.id
+        flash("Presupuesto creado. Ahora armá el modelo: la configuración manda sobre "
+              "todo lo que viene después.", "ok")
+        return redirect(url_for("configurar", step="estructura"))
+
+    # ------------------------------------------------------------ wizard
+    @app.get("/configurar")
+    @app.get("/configurar/<step>")
+    def configurar(step="general"):
+        v, u = version(), user()
+        if step not in wizard.STEP_BY_KEY:
+            step = "general"
+        report = service.validate_version(v) if step == "cierre" else None
+        return render_template(
+            "configurar.html", step=wizard.STEP_BY_KEY[step], steps=wizard.STEPS,
+            state=wizard.step_state(v), cfg=v.configuration, fx=wizard.fx_summary(v),
+            editable=wizard.can_edit_step(u, wizard.STEP_BY_KEY[step])
+                     and v.configuration.status.value != "LOCKED" and v.mutable,
+            catalog=RATIO_CATALOG, report=report, users=list(service.users.values()),
+            scope_options=wizard.scope_options(v.configuration),
+            workflow_concepts=wizard.WORKFLOW_CONCEPTS,
+            findings=validate_configuration(v.configuration, v.fx),
+            frequencies=[f.value for f in Frequency], roles=[r.value for r in Role])
+
+    @app.post("/configurar/<step>/<action>")
+    def configurar_accion(step, action):
+        v, u = version(), user()
+        service.auth.check(u, "budget.configuration.edit")
+        if not wizard.can_edit_step(u, wizard.STEP_BY_KEY[step]):
+            raise BudgetError("UNAUTHORIZED",
+                              f"Este paso lo define {wizard.STEP_BY_KEY[step].owner.value}.")
+        handlers = {
+            "general": wizard.update_general, "fx": wizard.set_fx_rate,
+            "unidad": wizard.add_business_unit, "sucursal": wizard.add_branch,
+            "soporte": wizard.add_support_unit, "centro": wizard.add_cost_center,
+            "familia": wizard.add_family, "producto": wizard.add_product,
+            "gasto": wizard.add_expense, "area": wizard.add_payroll_area,
+            "aumento": wizard.add_increase_rule, "concepto": wizard.add_percentage_concept,
+            "modulos": wizard.update_modules, "capex_categoria": wizard.add_capex_category,
+            "rubro": wizard.add_balance_item, "ratios": wizard.update_ratios,
+            "workflow": wizard.update_workflow,
+        }
+        if action == "usuario":
+            wizard.add_user(service, v, request.form)
+        elif action == "borrar_usuario":
+            wizard.remove_user(service, request.form["user_id"])
+        elif action in handlers:
+            handlers[action](v, request.form)
+        elif action == "rubros_default":
+            wizard.add_default_balance_items(v)
+        elif action == "workflow_default":
+            wizard.default_workflow(v)
+        else:
+            raise BudgetError("NOT_FOUND", action)
+        service.audit.record(actor=session["user_id"], action="ConfigurationUpdated",
+                             entity_type="CONFIGURATION", entity_id=action, version_id=v.id,
+                             after=request.form.get("name") or action)
+        flash("Guardado.", "ok")
+        return redirect(url_for("configurar", step=step))
+
+    @app.post("/configurar/<step>/borrar/<kind>/<path:entity_id>")
+    def configurar_borrar(step, kind, entity_id):
+        v, u = version(), user()
+        service.auth.check(u, "budget.configuration.edit")
+        wizard.remove(v, kind, entity_id)
+        service.audit.record(actor=session["user_id"], action="ConfigurationDeleted",
+                             entity_type=kind.upper(), entity_id=entity_id, version_id=v.id,
+                             before=entity_id)
+        flash("Eliminado.", "ok")
+        return redirect(url_for("configurar", step=step))
+
+    @app.post("/configurar/cerrar")
+    def cerrar_configuracion():
+        v = version()
+        service.close_configuration(session["user_id"], v)
+        flash("Configuración cerrada. Se generaron las tareas de carga y a partir de "
+              "ahora la estructura está bloqueada.", "ok")
+        return redirect(url_for("panel"))
 
     # ------------------------------------------------------------ configuración y versiones
     @app.get("/configuracion")
