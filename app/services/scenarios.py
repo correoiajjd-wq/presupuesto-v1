@@ -10,7 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional
 
-from ..domain.config import Configuration
+from ..domain.config import Configuration, MarginFormula
 from ..domain.engine import BudgetEngine, FY
 from ..domain.graph import nk
 from ..domain.inputs import Concept, InputSet, InputSource
@@ -42,7 +42,7 @@ def apply_overlay(cfg: Configuration, inputs: InputSet,
     new_inputs = inputs.model_copy(deep=True)
 
     # los inputs de ventas no siempre traen business_unit_id resuelto por sucursal
-    branch_to_unit = {b.id: u.id for u in cfg.business_units for b in u.branches}
+    branch_to_unit = {b.id: u.id for u, b in cfg.all_branches()}
     for iv in new_inputs.values:
         if iv.branch_id and not iv.business_unit_id:
             iv.business_unit_id = branch_to_unit.get(iv.branch_id)
@@ -52,18 +52,25 @@ def apply_overlay(cfg: Configuration, inputs: InputSet,
             raise BudgetError("INVALID_SCENARIO_CONCEPT",
                               f"{adj.concept} no es un input sobre el que se pueda simular")
         if adj.concept == "COST":
-            # subir el costo 5% = bajar el margen para dejar el costo 5% arriba
+            # Subir el costo 5% = mover el margen para que el costo quede 5% arriba.
+            # Cada producto tiene su fórmula, así que se opera sobre la proporción
+            # de costo y después se vuelve al margen que corresponda.
             factor = Decimal(1) + adj.variation
             for unit in new_cfg.business_units:
                 if adj.business_unit_id and unit.id != adj.business_unit_id:
                     continue
                 for p in unit.products:
-                    new_cost_ratio = (Decimal(1) - p.margin) * factor
-                    if new_cost_ratio >= 1:
-                        raise BudgetError("INVALID_SCENARIO",
-                                          f"la variación deja el costo por encima de las ventas "
-                                          f"en {p.code}")
-                    p.margin = Decimal(1) - new_cost_ratio
+                    if p.margin_formula is MarginFormula.NO_COST:
+                        continue          # sin costo no hay nada que mover
+                    new_ratio = p.cost_ratio * factor
+                    if new_ratio >= 1:
+                        raise BudgetError(
+                            "INVALID_SCENARIO",
+                            f"la variación deja el costo por encima de las ventas en {p.code}")
+                    if p.margin_formula is MarginFormula.MARKUP_ON_COST:
+                        p.margin = Decimal(1) / new_ratio - Decimal(1)
+                    else:
+                        p.margin = Decimal(1) - new_ratio
             continue
 
         for iv in new_inputs.values:

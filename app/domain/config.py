@@ -23,6 +23,9 @@ from .periods import FiscalYear, Frequency
 # Enums
 # --------------------------------------------------------------------------
 class SalesMode(str, Enum):
+    """Doc 02 §10. Se define por producto: una misma unidad puede vender
+    mercadería por unidades y servicios por monto."""
+
     UNIT_BASED = "UNIT_BASED"      # el gerente carga cantidad
     AMOUNT_BASED = "AMOUNT_BASED"  # el gerente carga monto
 
@@ -30,16 +33,27 @@ class SalesMode(str, Enum):
 class MarginFormula(str, Enum):
     """Doc 02 §11: la fórmula de margen es configuración, no elección del que carga."""
 
-    PERCENTAGE_OF_SALES = "PERCENTAGE_OF_SALES"  # costo = ventas * (1 - margen)
+    PERCENTAGE_OF_SALES = "PERCENTAGE_OF_SALES"  # costo = ventas x (1 - margen)
     MARKUP_ON_COST = "MARKUP_ON_COST"            # costo = ventas / (1 + margen)
+    NO_COST = "NO_COST"                          # costo = 0; el precio es todo margen
 
 
-class ExpenseLevel(str, Enum):
+class ExpenseTargetType(str, Enum):
     COMPANY = "COMPANY"
     BUSINESS_UNIT = "BUSINESS_UNIT"
     BRANCH = "BRANCH"
     COST_CENTER = "COST_CENTER"
-    DISTRIBUTED = "DISTRIBUTED"
+
+
+class AllocationMode(str, Enum):
+    """Cómo llega el importe de un gasto a cada destino."""
+
+    #: Se carga un importe por cada destino. Si no corresponde, se carga 0.
+    #: Es el modo natural cuando el mismo concepto existe en varios lugares
+    #: con montos distintos: internet en cada sucursal y en administración.
+    PER_TARGET = "PER_TARGET"
+    #: Se carga un único total y el sistema lo reparte con porcentajes fijos.
+    PERCENTAGE = "PERCENTAGE"
 
 
 class InventoryLevel(str, Enum):
@@ -104,8 +118,21 @@ class Effectivity(BaseModel):
 
 
 class Branch(Effectivity):
+    """Sucursal.
+
+    Se da de alta a nivel empresa para que el nombre exista una sola vez, y
+    después se asigna a su unidad de negocio eligiéndola de un selector. Una
+    sucursal pertenece a una única unidad; mientras no esté asignada, existe
+    pero no genera cargas.
+    """
+
     id: str
     name: str
+    business_unit_id: Optional[str] = None
+
+    @property
+    def assigned(self) -> bool:
+        return self.business_unit_id is not None
 
 
 class ProductFamily(BaseModel):
@@ -114,35 +141,52 @@ class ProductFamily(BaseModel):
 
 
 class Product(BaseModel):
+    """La modalidad de venta y la fórmula de margen viven acá, no en la unidad:
+    una misma unidad puede vender mercadería por unidades y servicios por monto."""
+
     id: str
     code: str
     name: str
     family_id: str
+    sales_mode: SalesMode = SalesMode.UNIT_BASED
+    margin_formula: MarginFormula = MarginFormula.PERCENTAGE_OF_SALES
     unit_of_measure: Literal["UNIT"] = "UNIT"   # V1: sólo "unidad"
     price: Decimal = Decimal(0)                 # constante en el ejercicio (V1)
-    price_currency: str
+    currency: str                               # del precio y de la carga por monto
     margin: Decimal                             # constante en el ejercicio (V1)
     sales_frequency: Frequency = Frequency.MONTHLY
-    is_other: bool = False                      # el obligatorio "XX — Otros"
+    is_other: bool = False                      # el obligatorio "XX — Otros" de la familia
 
-    @field_validator("margin")
-    @classmethod
-    def _margin_range(cls, v: Decimal) -> Decimal:
-        if not (Decimal(-1) < v < Decimal(1)):
-            raise ValueError("margin debe expresarse como fracción (0.25 = 25%)")
-        return v
+    @model_validator(mode="after")
+    def _check(self) -> "Product":
+        if self.margin_formula is MarginFormula.NO_COST:
+            object.__setattr__(self, "margin", Decimal(1))
+        elif not (Decimal(-1) < self.margin < Decimal(1)):
+            raise ConfigurationError(
+                "INVALID_MARGIN",
+                f"producto {self.code}: el margen se expresa como fracción (0.25 = 25%). "
+                "Si el precio es todo margen, usá la fórmula 'sin costo'.")
+        if self.sales_mode is SalesMode.UNIT_BASED and self.price <= 0:
+            raise ConfigurationError(
+                "INVALID_PRODUCT", f"producto {self.code}: precio requerido en venta por unidades")
+        return self
+
+    @property
+    def cost_ratio(self) -> Decimal:
+        """Qué proporción de la venta es costo."""
+        if self.margin_formula is MarginFormula.NO_COST:
+            return Decimal(0)
+        if self.margin_formula is MarginFormula.MARKUP_ON_COST:
+            return Decimal(1) / (Decimal(1) + self.margin)
+        return Decimal(1) - self.margin
 
 
 class BusinessUnit(Effectivity):
     id: str
     name: str
-    sales_mode: SalesMode
-    margin_formula: MarginFormula = MarginFormula.PERCENTAGE_OF_SALES
-    sales_currency: str                        # moneda de la carga AMOUNT_BASED
-    branches: list[Branch] = Field(default_factory=list)
     families: list[ProductFamily] = Field(default_factory=list)
     products: list[Product] = Field(default_factory=list)
-    commission_rate: Optional[Decimal] = None  # si se define, nómina lo calcula (doc 01 §19)
+    commission_rate: Optional[Decimal] = None  # doc 01 §19: comisión sobre ventas
 
     @model_validator(mode="after")
     def _check(self) -> "BusinessUnit":
@@ -150,19 +194,16 @@ class BusinessUnit(Effectivity):
         for p in self.products:
             if p.family_id not in fam_ids:
                 raise ConfigurationError(
-                    "INVALID_FAMILY", f"producto {p.code} referencia familia inexistente {p.family_id}"
-                )
-        if self.products and not any(p.is_other for p in self.products):
-            raise ConfigurationError(
-                "MISSING_OTHER_PRODUCT",
-                f"la unidad {self.id} debe tener el producto obligatorio 'XX — Otros'",
-            )
-        if self.sales_mode is SalesMode.UNIT_BASED:
-            for p in self.products:
-                if p.price <= 0:
-                    raise ConfigurationError(
-                        "INVALID_PRODUCT", f"producto {p.code}: precio requerido en modalidad por unidades"
-                    )
+                    "INVALID_FAMILY",
+                    f"producto {p.code} referencia familia inexistente {p.family_id}")
+        # Doc 02 §8/§9: el "Otros" es por familia, no por unidad: cada familia
+        # necesita su propio cajón para lo que no está en el catálogo.
+        for fam in self.families:
+            others = [p for p in self.products if p.family_id == fam.id and p.is_other]
+            if len(others) > 1:
+                raise ConfigurationError(
+                    "DUPLICATE_OTHER_PRODUCT",
+                    f"la familia {fam.name} tiene más de un producto 'Otros'")
         return self
 
     def product(self, product_id: str) -> Product:
@@ -171,11 +212,15 @@ class BusinessUnit(Effectivity):
                 return p
         raise ConfigurationError("INVALID_PRODUCT", f"{product_id} no existe en {self.id}")
 
-    def branch(self, branch_id: str) -> Branch:
-        for b in self.branches:
-            if b.id == branch_id:
-                return b
-        raise ConfigurationError("INVALID_BRANCH", f"{branch_id} no existe en {self.id}")
+    def family(self, family_id: str) -> ProductFamily:
+        for f in self.families:
+            if f.id == family_id:
+                return f
+        raise ConfigurationError("INVALID_FAMILY", f"{family_id} no existe en {self.id}")
+
+    def missing_other_products(self) -> list[ProductFamily]:
+        return [f for f in self.families
+                if not any(p.family_id == f.id and p.is_other for p in self.products)]
 
 
 class CostCenter(BaseModel):
@@ -192,41 +237,66 @@ class SupportUnit(Effectivity):
 # --------------------------------------------------------------------------
 # Gastos
 # --------------------------------------------------------------------------
-class Allocation(BaseModel):
-    """Distribución explícita de un gasto (doc 03 §12)."""
+class ExpenseTarget(BaseModel):
+    """Un destino de imputación de un gasto (doc 03 §12).
 
-    target_type: Literal["BUSINESS_UNIT", "BRANCH", "COST_CENTER"]
-    target_id: str
-    percentage: Decimal
+    Un mismo gasto puede tener varios: internet va a todas las sucursales y a
+    algunos centros de costo. En modo PER_TARGET cada destino recibe su propio
+    importe; en modo PERCENTAGE recibe una porción del total.
+    """
+
+    target_type: ExpenseTargetType
+    target_id: Optional[str] = None          # None sólo para COMPANY
+    percentage: Optional[Decimal] = None     # sólo en PERCENTAGE
+    #: Doc 02 §22: mostrar el gasto de una unidad repartido entre sus sucursales,
+    #: proporcional al volumen de ventas.
+    distribute_to_branches: bool = False
+
+    @property
+    def scope_key(self) -> str:
+        if self.target_type is ExpenseTargetType.COMPANY:
+            return "CO"
+        prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}[
+            self.target_type.value]
+        return f"{prefix}:{self.target_id}"
+
+    @property
+    def corporate(self) -> bool:
+        """Empresa y centros de costo se muestran asignados debajo del EBITDA."""
+        return self.target_type in (ExpenseTargetType.COMPANY, ExpenseTargetType.COST_CENTER)
 
 
 class ExpenseDefinition(BaseModel):
     id: str
     name: str
-    level: ExpenseLevel
-    target_id: Optional[str] = None                 # requerido salvo COMPANY/DISTRIBUTED
-    allocations: list[Allocation] = Field(default_factory=list)
+    allocation_mode: AllocationMode = AllocationMode.PER_TARGET
+    targets: list[ExpenseTarget] = Field(default_factory=list)
     currency: str
     frequency: Frequency = Frequency.MONTHLY
     responsible_role: Role = Role.ADMIN_AREA
-    distribute_to_branches: bool = False            # doc 02 §22: proporcional a ventas
-    corporate: bool = False                         # se muestra bajo EBITDA de la unidad
 
     @model_validator(mode="after")
     def _check(self) -> "ExpenseDefinition":
-        if self.level is ExpenseLevel.DISTRIBUTED:
-            if not self.allocations:
-                raise ConfigurationError("INVALID_ALLOCATION", f"gasto {self.id} sin distribución")
-            total = sum((a.percentage for a in self.allocations), Decimal(0))
+        if not self.targets:
+            raise ConfigurationError(
+                "INVALID_EXPENSE", f"gasto {self.name or self.id}: elegí al menos un destino")
+        for t in self.targets:
+            if t.target_type is not ExpenseTargetType.COMPANY and not t.target_id:
+                raise ConfigurationError("INVALID_EXPENSE_TARGET",
+                                         f"gasto {self.name}: destino sin identificar")
+        if self.allocation_mode is AllocationMode.PERCENTAGE:
+            total = sum((t.percentage or Decimal(0) for t in self.targets), Decimal(0))
             if total != Decimal(1):
                 raise ConfigurationError(
                     "INVALID_ALLOCATION",
-                    f"gasto {self.id}: la distribución suma {total * 100}%, debe sumar 100%",
-                )
-        elif self.level in (ExpenseLevel.BUSINESS_UNIT, ExpenseLevel.BRANCH, ExpenseLevel.COST_CENTER):
-            if not self.target_id:
-                raise ConfigurationError("INVALID_EXPENSE", f"gasto {self.id} sin target_id")
+                    f"gasto {self.name}: la distribución suma {total * 100}%, debe sumar 100%")
         return self
+
+    def target_for(self, scope_key: str) -> Optional[ExpenseTarget]:
+        for t in self.targets:
+            if t.scope_key == scope_key:
+                return t
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -368,6 +438,7 @@ class Configuration(BaseModel):
     enabled_currencies: list[str] = Field(default_factory=list)
 
     business_units: list[BusinessUnit] = Field(default_factory=list)
+    branches: list[Branch] = Field(default_factory=list)      # catálogo de la empresa
     support_units: list[SupportUnit] = Field(default_factory=list)
     expenses: list[ExpenseDefinition] = Field(default_factory=list)
     payroll: PayrollConfig = Field(default_factory=PayrollConfig)
@@ -406,15 +477,35 @@ class Configuration(BaseModel):
                 return e
         raise ConfigurationError("INVALID_EXPENSE", expense_id)
 
-    def branch_owner(self, branch_id: str) -> BusinessUnit:
-        for u in self.business_units:
-            for b in u.branches:
-                if b.id == branch_id:
-                    return u
+    def branch(self, branch_id: str) -> Branch:
+        for b in self.branches:
+            if b.id == branch_id:
+                return b
         raise ConfigurationError("INVALID_BRANCH", branch_id)
 
+    def branch_owner(self, branch_id: str) -> BusinessUnit:
+        b = self.branch(branch_id)
+        if not b.assigned:
+            raise ConfigurationError("UNASSIGNED_BRANCH",
+                                     f"la sucursal {b.name} no está asignada a ninguna unidad")
+        return self.unit(b.business_unit_id)
+
+    def unit_branches(self, unit_id: str) -> list[Branch]:
+        return [b for b in self.branches if b.business_unit_id == unit_id]
+
     def all_branches(self) -> list[tuple[BusinessUnit, Branch]]:
-        return [(u, b) for u in self.business_units for b in u.branches]
+        """Sólo las sucursales asignadas: son las que participan del presupuesto."""
+        out = []
+        for b in self.branches:
+            if b.assigned:
+                try:
+                    out.append((self.unit(b.business_unit_id), b))
+                except ConfigurationError:
+                    continue
+        return out
+
+    def unassigned_branches(self) -> list[Branch]:
+        return [b for b in self.branches if not b.assigned]
 
     def cost_center_owner(self, cc_id: str) -> SupportUnit:
         for u in self.support_units:
@@ -422,6 +513,27 @@ class Configuration(BaseModel):
                 if cc.id == cc_id:
                     return u
         raise ConfigurationError("INVALID_COST_CENTER", cc_id)
+
+    def scope_label(self, scope_key: str) -> str:
+        if scope_key == "CO":
+            return "Empresa"
+        kind, _id = scope_key.split(":", 1)
+        try:
+            if kind == "BU":
+                return self.unit(_id).name
+            if kind == "BR":
+                b = self.branch(_id)
+                owner = self.unit(b.business_unit_id).name if b.assigned else "sin asignar"
+                return f"{owner} / {b.name}"
+            if kind == "SU":
+                return self.support_unit(_id).name
+            if kind == "CC":
+                su = self.cost_center_owner(_id)
+                cc = next(c for c in su.cost_centers if c.id == _id)
+                return f"{su.name} / {cc.name}"
+        except Exception:
+            pass
+        return scope_key
 
     def is_active(self, entity: Effectivity, period) -> bool:
         """Vigencia por período (doc 02 §7)."""
@@ -440,10 +552,15 @@ class Configuration(BaseModel):
         if self.presentation_currency not in self.enabled_currencies:
             errors.append(
                 f"INVALID_CURRENCY: la moneda de presentación {self.presentation_currency} "
-                "no está en las monedas habilitadas"
-            )
+                "no está en las monedas habilitadas")
         if not self.business_units:
             errors.append("INCOMPLETE_CONFIGURATION: no hay unidades de negocio")
+        if not self.all_branches():
+            errors.append("INCOMPLETE_CONFIGURATION: no hay sucursales asignadas a una unidad")
+
+        for b in self.unassigned_branches():
+            errors.append(
+                f"UNASSIGNED_BRANCH: la sucursal {b.name} no está asignada a ninguna unidad")
 
         seen_ids: set[str] = set()
 
@@ -453,25 +570,32 @@ class Configuration(BaseModel):
                 errors.append(f"DUPLICATE_ID: {key}")
             seen_ids.add(key)
 
+        seen_names: set[str] = set()
+        for b in self.branches:
+            uniq("BR", b.id)
+            low = b.name.strip().lower()
+            if low in seen_names:
+                errors.append(f"DUPLICATE_BRANCH_NAME: hay más de una sucursal llamada {b.name}")
+            seen_names.add(low)
+            for f, label in ((b.effective_from, "inicio"), (b.effective_to, "cierre")):
+                if f and not (fy.start <= f <= fy.end):
+                    errors.append(
+                        f"INVALID_PERIOD: sucursal {b.name} fecha de {label} fuera del ejercicio")
+
         for u in self.business_units:
             uniq("BU", u.id)
-            if not u.branches:
-                errors.append(f"INCOMPLETE_CONFIGURATION: unidad {u.id} sin sucursales")
+            if not self.unit_branches(u.id):
+                errors.append(f"INCOMPLETE_CONFIGURATION: la unidad {u.name} no tiene sucursales")
             if not u.products:
-                errors.append(f"INCOMPLETE_CONFIGURATION: unidad {u.id} sin productos")
-            if u.sales_currency not in self.enabled_currencies:
-                errors.append(f"INVALID_CURRENCY: {u.sales_currency} en unidad {u.id}")
-            for b in u.branches:
-                uniq("BR", b.id)
-                for f, label in ((b.effective_from, "inicio"), (b.effective_to, "cierre")):
-                    if f and not (fy.start <= f <= fy.end):
-                        errors.append(
-                            f"INVALID_PERIOD: sucursal {b.id} fecha de {label} fuera del ejercicio"
-                        )
+                errors.append(f"INCOMPLETE_CONFIGURATION: la unidad {u.name} no tiene productos")
+            for fam in u.missing_other_products():
+                errors.append(
+                    f"MISSING_OTHER_PRODUCT: la familia {fam.name} de {u.name} necesita su "
+                    "producto 'Otros'")
             for p in u.products:
                 uniq("PROD", p.id)
-                if p.price_currency not in self.enabled_currencies:
-                    errors.append(f"INVALID_CURRENCY: {p.price_currency} en producto {p.code}")
+                if p.currency not in self.enabled_currencies:
+                    errors.append(f"INVALID_CURRENCY: {p.currency} en producto {p.code}")
             for f in u.families:
                 uniq("FAM", f.id)
 
@@ -481,29 +605,26 @@ class Configuration(BaseModel):
                 uniq("CC", cc.id)
 
         known = seen_ids
+        prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}
         for e in self.expenses:
             uniq("EXP", e.id)
             if e.currency not in self.enabled_currencies:
-                errors.append(f"INVALID_CURRENCY: {e.currency} en gasto {e.id}")
-            targets = (
-                [(a.target_type, a.target_id) for a in e.allocations]
-                if e.level is ExpenseLevel.DISTRIBUTED
-                else ([(e.level.value, e.target_id)] if e.target_id else [])
-            )
-            prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}
-            for ttype, tid in targets:
-                key = f"{prefix.get(ttype, ttype)}:{tid}"
-                if ttype in prefix and key not in known:
-                    errors.append(f"INVALID_EXPENSE_TARGET: gasto {e.id} apunta a {key} inexistente")
+                errors.append(f"INVALID_CURRENCY: {e.currency} en gasto {e.name}")
+            for t in e.targets:
+                if t.target_type is ExpenseTargetType.COMPANY:
+                    continue
+                key = f"{prefix[t.target_type.value]}:{t.target_id}"
+                if key not in known:
+                    errors.append(
+                        f"INVALID_EXPENSE_TARGET: el gasto {e.name} apunta a {key}, que no existe")
 
         for a in self.payroll.areas:
             if a.currency not in self.enabled_currencies:
-                errors.append(f"INVALID_CURRENCY: {a.currency} en área de nómina {a.id}")
+                errors.append(f"INVALID_CURRENCY: {a.currency} en área de nómina {a.name}")
         for r in self.payroll.increase_rules:
             if not (fy.start <= r.effective_date <= fy.end):
                 errors.append(
-                    f"INVALID_PERIOD: regla de aumento {r.effective_date} fuera del ejercicio"
-                )
+                    f"INVALID_PERIOD: regla de aumento {r.effective_date} fuera del ejercicio")
 
         if self.inventory.enabled:
             if self.inventory.currency not in self.enabled_currencies:
@@ -526,11 +647,7 @@ class Configuration(BaseModel):
         return errors
 
     def required_concepts(self) -> set[str]:
-        """Doc 02 §42: la obligatoriedad surge del modelo, no de una lista rígida.
-
-        Devuelve los conceptos de input que el modelo exige: los del P&L mínimo
-        más los que arrastren los ratios seleccionados y los módulos habilitados.
-        """
+        """Doc 02 §42: la obligatoriedad surge del modelo, no de una lista rígida."""
         from .ratios import RATIO_CATALOG
 
         required = {"SALES", "EXPENSES", "PAYROLL_HEADCOUNT"}
@@ -559,14 +676,14 @@ class Configuration(BaseModel):
                 continue
             if "OPENING_STOCK" in ratio.required_inputs and not self.inventory.enabled:
                 out.append(
-                    f"PENDING_DEPENDENCY: el ratio {ratio.code} requiere Stock, que no está configurado"
-                )
+                    f"PENDING_DEPENDENCY: el ratio {ratio.name} requiere Stock, que no está "
+                    "configurado")
             if "BALANCE" in ratio.required_inputs and not self.balance.enabled:
                 out.append(
-                    f"PENDING_DEPENDENCY: el ratio {ratio.code} requiere Balance, que no está configurado"
-                )
+                    f"PENDING_DEPENDENCY: el ratio {ratio.name} requiere Balance, que no está "
+                    "configurado")
             if "CAPEX" in ratio.required_inputs and not self.capex.enabled:
                 out.append(
-                    f"PENDING_DEPENDENCY: el ratio {ratio.code} requiere CAPEX, que no está configurado"
-                )
+                    f"PENDING_DEPENDENCY: el ratio {ratio.name} requiere CAPEX, que no está "
+                    "configurado")
         return out

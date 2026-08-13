@@ -7,6 +7,9 @@ la configuración no haya requerido.
 Los formularios de esta pantalla no están escritos a mano en ninguna plantilla:
 se derivan de la configuración de la versión, igual que las planillas de carga
 masiva. Si el CFO no configuró Stock, la pantalla de Stock no existe.
+
+Los nombres de campo usan "~" como separador porque los ámbitos ya contienen
+":" (BR:BR-01).
 """
 from __future__ import annotations
 
@@ -14,9 +17,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from ..domain.config import Configuration, SalesMode
+from ..domain.config import AllocationMode, Configuration, SalesMode
 from ..domain.inputs import ChangeType, Concept, InputValue
-from ..domain.periods import Frequency, Period
+
+SEP = "~"
 
 
 @dataclass
@@ -46,15 +50,16 @@ class FormSpec:
     extra: dict = field(default_factory=dict)
 
 
-def _existing(version, **criteria) -> dict[str, Decimal]:
-    out = {}
+def _index(version, concept: Concept) -> dict[str, Decimal]:
+    """Los valores ya cargados, indexados por una clave estable."""
+    out: dict[str, Decimal] = {}
     for iv in version.inputs.values:
-        ok = all(getattr(iv, k, None) == v for k, v in criteria.items() if k != "concept")
-        if ok and iv.concept is criteria["concept"]:
-            key = "|".join(str(getattr(iv, f) or "") for f in
-                           ("branch_id", "product_id", "expense_id", "family_id",
-                            "area_id", "balance_item_id", "period"))
-            out[key] = iv.value
+        if iv.concept is not concept:
+            continue
+        key = SEP.join([iv.scope_key, iv.product_id or "", iv.expense_id or "",
+                        iv.family_id or "", iv.area_id or "", iv.balance_item_id or "",
+                        iv.period or ""])
+        out[key] = iv.value
     return out
 
 
@@ -88,69 +93,76 @@ def build_form(version, task) -> FormSpec:
 def _sales_form(cfg: Configuration, version, task) -> FormSpec:
     branch_id = task.scope_key.split(":", 1)[1]
     unit = cfg.branch_owner(branch_id)
-    branch = unit.branch(branch_id)
+    branch = cfg.branch(branch_id)
     fy = cfg.fiscal_year
-    unit_based = unit.sales_mode is SalesMode.UNIT_BASED
-    concept = Concept.SALES_QTY if unit_based else Concept.SALES_AMOUNT
-    current = _existing(version, concept=concept, branch_id=branch_id)
+    qty = _index(version, Concept.SALES_QTY)
+    amt = _index(version, Concept.SALES_AMOUNT)
 
     rows: list[Row] = []
     for product in unit.products:
+        unit_based = product.sales_mode is SalesMode.UNIT_BASED
+        current = qty if unit_based else amt
         for head, bucket in fy.iter_buckets(product.sales_frequency):
             if not any(cfg.is_active(branch, p) for p in bucket):
                 continue
-            key = f"{branch_id}|{product.id}||||" + f"|{head.code}"
-            detail = (f"precio {product.price} {product.price_currency} · "
-                      f"margen {product.margin * 100:.0f}%" if unit_based
-                      else f"margen {product.margin * 100:.0f}% · {unit.sales_currency}")
+            key = SEP.join([task.scope_key, product.id, "", "", "", "", head.code])
+            detail = (f"precio {product.price} {product.currency}" if unit_based
+                      else f"monto en {product.currency}")
+            margen = ("sin costo" if product.margin_formula.value == "NO_COST"
+                      else f"margen {product.margin * 100:.0f}%")
             rows.append(Row(
-                label=f"{product.code} — {product.name}",
-                detail=f"{head.code} · {product.sales_frequency.value.lower()} · {detail}",
-                fields=[Field_(name=f"S:{product.id}:{head.code}",
+                label=f"{product.code} — {product.name}"
+                      + ("  (Otros)" if product.is_other else ""),
+                detail=f"{head.code} · {product.sales_frequency.value.lower()} · {detail} · {margen}",
+                fields=[Field_(name=SEP.join(["S", product.id, head.code]),
                                label="Cantidad" if unit_based else "Monto",
                                value=_fmt(current.get(key)),
-                               currency="unidades" if unit_based else unit.sales_currency)]))
-    intro = ("Cargá la cantidad por producto y período. El precio y el margen los define la "
-             "configuración: el sistema calcula ventas, costo y margen."
-             if unit_based else
-             f"Cargá el monto de ventas en {unit.sales_currency}. El sistema calcula el costo "
-             "con el margen configurado.")
-    return FormSpec(f"Ventas — {unit.name} / {branch.name}",
-                    intro + " Si un producto no se vende, cargá 0 (vacío es error).",
-                    ["Producto", "Período"], rows, "budget.sales.load")
+                               currency="unidades" if unit_based else product.currency)]))
+    return FormSpec(
+        f"Ventas — {unit.name} / {branch.name}",
+        "Cada producto se carga como lo define la configuración: por cantidad o por monto. "
+        "El precio y el margen no se tocan acá; el sistema calcula ventas, costo y margen. "
+        "Si un producto no se vende, cargá 0 (vacío es error).",
+        ["Producto", "Período"], rows, "budget.sales.load")
 
 
 def _expenses_form(cfg: Configuration, version) -> FormSpec:
     fy = cfg.fiscal_year
-    current = _existing(version, concept=Concept.EXPENSE_AMOUNT)
+    current = _index(version, Concept.EXPENSE_AMOUNT)
     rows: list[Row] = []
     for ed in cfg.expenses:
-        target = {"COMPANY": "Empresa", "DISTRIBUTED": "Distribuido por porcentaje"}.get(
-            ed.level.value, f"{ed.level.value} {ed.target_id}")
+        per_target = ed.allocation_mode is AllocationMode.PER_TARGET
+        scopes = [t.scope_key for t in ed.targets] if per_target else ["CO"]
         for head, _ in fy.iter_buckets(ed.frequency):
-            key = f"||{ed.id}||||{head.code}"
-            rows.append(Row(
-                label=ed.name,
-                detail=f"{head.code} · {ed.frequency.value.lower()} · {target}"
-                       + (" · se distribuye a sucursales" if ed.distribute_to_branches else ""),
-                fields=[Field_(name=f"E:{ed.id}:{head.code}", label="Importe",
-                               value=_fmt(current.get(key)), currency=ed.currency)]))
-    return FormSpec("Gastos", "El nivel de imputación y la moneda los define el CFO en la "
-                    "configuración; acá sólo se carga el importe total.",
-                    ["Gasto", "Período"], rows, "budget.expense.load")
+            for scope in scopes:
+                key = SEP.join([scope, "", ed.id, "", "", "", head.code])
+                destino = (cfg.scope_label(scope) if per_target
+                           else "total, se reparte por porcentajes")
+                rows.append(Row(
+                    label=f"{ed.name} — {destino}",
+                    detail=f"{head.code} · {ed.frequency.value.lower()} · {ed.currency}",
+                    fields=[Field_(name=SEP.join(["E", ed.id, scope, head.code]),
+                                   label="Importe", value=_fmt(current.get(key)),
+                                   currency=ed.currency)]))
+    return FormSpec(
+        "Gastos",
+        "El nivel de imputación, la moneda y la frecuencia los define el CFO; acá sólo se "
+        "carga el importe. Un mismo gasto puede tener varios destinos: donde no corresponde, "
+        "se carga 0.",
+        ["Gasto y destino", "Período"], rows, "budget.expense.load")
 
 
 def _payroll_form(cfg: Configuration, version, task) -> FormSpec:
     scope = task.scope_key
-    current = _existing(version, concept=Concept.INITIAL_HEADCOUNT)
+    current = _index(version, Concept.INITIAL_HEADCOUNT)
     rows: list[Row] = []
     for area in cfg.payroll.areas:
-        key = f"{scope.split(':')[-1] if scope.startswith('BR') else ''}||||{area.id}||"
+        key = SEP.join([scope, "", "", "", area.id, "", ""])
         rows.append(Row(
             label=area.name,
             detail=f"sueldo base {area.base_salary} {area.currency} · "
                    f"cargas {((cfg.payroll.charges_factor - 1) * 100):.0f}%",
-            fields=[Field_(name=f"H:{area.id}", label="Dotación inicial",
+            fields=[Field_(name=SEP.join(["H", area.id]), label="Dotación inicial",
                            value=_fmt(current.get(key)), currency="personas")]))
     movements = [iv for iv in version.inputs.values
                  if iv.concept is Concept.HEADCOUNT_CHANGE and iv.scope_key == scope]
@@ -168,8 +180,7 @@ def _capex_form(cfg: Configuration, version) -> FormSpec:
     items = [iv for iv in version.inputs.values if iv.concept is Concept.CAPEX_AMOUNT]
     scopes = ([("CO", "Empresa")]
               + [(f"BU:{u.id}", u.name) for u in cfg.business_units]
-              + [(f"BR:{b.id}", f"{u.name} / {b.name}") for u in cfg.business_units
-                 for b in u.branches]
+              + [(f"BR:{b.id}", f"{u.name} / {b.name}") for u, b in cfg.all_branches()]
               + [(f"SU:{u.id}", u.name) for u in cfg.support_units])
     return FormSpec("CAPEX", "Sin depreciación en V1: se carga la inversión y el período.",
                     [], [], "budget.expense.load",
@@ -185,22 +196,21 @@ def _stock_form(cfg: Configuration, version) -> FormSpec:
     scopes = {"COMPANY": [("CO", "Empresa")],
               "BUSINESS_UNIT": [(f"BU:{u.id}", u.name) for u in cfg.business_units],
               "BRANCH": [(f"BR:{b.id}", f"{u.name} / {b.name}")
-                         for u in cfg.business_units for b in u.branches]}[level]
-    open_cur = _existing(version, concept=Concept.OPENING_STOCK)
-    pur_cur = _existing(version, concept=Concept.PURCHASES)
+                         for u, b in cfg.all_branches()]}[level]
+    open_cur = _index(version, Concept.OPENING_STOCK)
+    pur_cur = _index(version, Concept.PURCHASES)
     fam_names = {f.id: f.name for u in cfg.business_units for f in u.families}
 
     rows: list[Row] = []
     for scope_key, scope_label in scopes:
         for fam in _families_for_scope(cfg, scope_key):
-            br = scope_key.split(":")[1] if scope_key.startswith("BR") else ""
-            okey = f"{br}|||{fam}|||"
-            fields = [Field_(name=f"O:{scope_key}:{fam}", label="Stock inicial",
+            okey = SEP.join([scope_key, "", "", fam, "", "", ""])
+            fields = [Field_(name=SEP.join(["O", scope_key, fam]), label="Stock inicial",
                              value=_fmt(open_cur.get(okey)), currency=cfg.inventory.currency)]
             if cfg.inventory.purchases_enabled:
                 for head, _ in fy.iter_buckets(cfg.inventory.frequency):
-                    pkey = f"{br}|||{fam}|||{head.code}"
-                    fields.append(Field_(name=f"P:{scope_key}:{fam}:{head.code}",
+                    pkey = SEP.join([scope_key, "", "", fam, "", "", head.code])
+                    fields.append(Field_(name=SEP.join(["P", scope_key, fam, head.code]),
                                          label=f"Compras {head.code}",
                                          value=_fmt(pur_cur.get(pkey)),
                                          currency=cfg.inventory.currency))
@@ -213,21 +223,21 @@ def _stock_form(cfg: Configuration, version) -> FormSpec:
 
 
 def _balance_form(cfg: Configuration, version) -> FormSpec:
-    op = _existing(version, concept=Concept.BALANCE_OPENING)
-    pr = _existing(version, concept=Concept.BALANCE_PROJECTED)
+    op = _index(version, Concept.BALANCE_OPENING)
+    pr = _index(version, Concept.BALANCE_PROJECTED)
     section_label = {"ASSET": "Activo", "LIABILITY": "Pasivo", "EQUITY": "Patrimonio"}
     rows: list[Row] = []
     for item in cfg.balance.items:
-        key = f"|||||{item.id}|"
+        key = SEP.join(["CO", "", "", "", "", item.id, ""])
         detail = (f"{section_label[item.section.value]} "
                   f"{'corriente' if item.current else 'no corriente'}")
         if item.source.value == "CALCULATED":
             rows.append(Row(item.name, detail + " · calculado, no se carga", []))
             continue
         rows.append(Row(item.name, detail, [
-            Field_(name=f"BO:{item.id}", label="Inicial", value=_fmt(op.get(key)),
+            Field_(name=SEP.join(["BO", item.id]), label="Inicial", value=_fmt(op.get(key)),
                    currency=cfg.balance.currency),
-            Field_(name=f"BP:{item.id}", label="Proyectado", value=_fmt(pr.get(key)),
+            Field_(name=SEP.join(["BP", item.id]), label="Proyectado", value=_fmt(pr.get(key)),
                    currency=cfg.balance.currency),
         ]))
     return FormSpec("Balance",
@@ -251,17 +261,15 @@ def _dec(raw: str) -> Optional[Decimal]:
 
 
 def apply_form(service, actor: str, version, task, formdata) -> int:
-    """Convierte el formulario en inputs y los manda por el servicio.
-
-    Devuelve la cantidad de valores cargados. Cualquier error de validación
-    sale como BudgetError y no deja nada a medias en el pedido.
-    """
+    """Convierte el formulario en inputs y los manda por el servicio."""
     cfg = version.configuration
     spec = build_form(version, task)
     pending: list[InputValue] = []
 
     for key, raw in formdata.items():
-        parts = key.split(":")
+        if SEP not in key:
+            continue
+        parts = key.split(SEP)
         value = _dec(raw)
         if value is None:
             continue
@@ -269,21 +277,22 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
         if parts[0] == "S":
             branch_id = task.scope_key.split(":", 1)[1]
             unit = cfg.branch_owner(branch_id)
-            product_id, period = parts[1], parts[2]
-            unit_based = unit.sales_mode is SalesMode.UNIT_BASED
+            product = unit.product(parts[1])
+            unit_based = product.sales_mode is SalesMode.UNIT_BASED
             pending.append(InputValue(
                 concept=Concept.SALES_QTY if unit_based else Concept.SALES_AMOUNT,
-                period=period, value=value,
-                currency=None if unit_based else unit.sales_currency,
-                business_unit_id=unit.id, branch_id=branch_id, product_id=product_id))
+                period=parts[2], value=value,
+                currency=None if unit_based else product.currency,
+                business_unit_id=unit.id, branch_id=branch_id, product_id=product.id))
         elif parts[0] == "E":
             ed = cfg.expense(parts[1])
-            pending.append(InputValue(concept=Concept.EXPENSE_AMOUNT, period=parts[2],
-                                      value=value, currency=ed.currency, expense_id=ed.id))
+            iv = InputValue(concept=Concept.EXPENSE_AMOUNT, period=parts[3],
+                            value=value, currency=ed.currency, expense_id=ed.id)
+            _set_scope(iv, parts[2], cfg)
+            pending.append(iv)
         elif parts[0] == "H":
-            scope = task.scope_key
             iv = InputValue(concept=Concept.INITIAL_HEADCOUNT, value=value, area_id=parts[1])
-            _set_scope(iv, scope, cfg)
+            _set_scope(iv, task.scope_key, cfg)
             pending.append(iv)
         elif parts[0] == "O":
             iv = InputValue(concept=Concept.OPENING_STOCK, value=value,
@@ -306,12 +315,13 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
 
 
 def _set_scope(iv: InputValue, scope_key: str, cfg: Configuration) -> None:
-    if scope_key == "CO":
+    if not scope_key or scope_key == "CO":
         return
     kind, _id = scope_key.split(":", 1)
     if kind == "BR":
         iv.branch_id = _id
-        iv.business_unit_id = cfg.branch_owner(_id).id
+        b = cfg.branch(_id)
+        iv.business_unit_id = b.business_unit_id
     elif kind == "BU":
         iv.business_unit_id = _id
     elif kind == "SU":

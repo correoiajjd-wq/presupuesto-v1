@@ -58,15 +58,16 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
     """Genera la planilla que le corresponde a ese gerente y a nadie más."""
     cfg = version.configuration
     unit = cfg.branch_owner(branch_id)
-    branch = unit.branch(branch_id)
+    branch = cfg.branch(branch_id)
     fy = cfg.fiscal_year
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Carga"
-    value_col = "CANTIDAD" if unit.sales_mode is SalesMode.UNIT_BASED else "MONTO"
-    headers = ["UNIDAD", "SUCURSAL", "PRODUCTO", "CODIGO", "FRECUENCIA", "PERIODO",
-               "MONEDA", value_col]
+    # La modalidad es del producto: en la misma planilla puede haber productos
+    # que se cargan por cantidad y otros por monto.
+    headers = ["UNIDAD", "SUCURSAL", "PRODUCTO", "CODIGO", "MODALIDAD", "FRECUENCIA",
+               "PERIODO", "MONEDA", "VALOR"]
     ws.append(headers)
     for i, _ in enumerate(headers, start=1):
         c = ws.cell(row=1, column=i)
@@ -78,14 +79,16 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
         for head, bucket in fy.iter_buckets(product.sales_frequency):
             if not any(cfg.is_active(branch, p) for p in bucket):
                 continue
-            ccy = product.price_currency if unit.sales_mode is SalesMode.UNIT_BASED else unit.sales_currency
+            unit_based = product.sales_mode is SalesMode.UNIT_BASED
             ws.append([unit.name, branch.name, product.name, product.code,
-                       product.sales_frequency.value, head.code, ccy, None])
-            for col in range(1, 8):
+                       "Cantidad" if unit_based else "Monto",
+                       product.sales_frequency.value, head.code,
+                       "unidades" if unit_based else product.currency, None])
+            for col in range(1, 9):
                 ws.cell(row=row, column=col).fill = LOCKED_FILL
             row += 1
 
-    widths = [22, 22, 26, 10, 14, 12, 10, 14]
+    widths = [22, 22, 26, 10, 12, 14, 12, 10, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
@@ -95,7 +98,7 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
     info["A1"].font = Font(bold=True, size=13)
     lines = [
         "La estructura de esta planilla la define la configuración aprobada; no se puede modificar.",
-        f"Cargue únicamente la columna {value_col}.",
+        "Cargue únicamente la columna VALOR: cantidad o monto según diga MODALIDAD.",
         "0 es un valor válido. Una celda vacía es un error si el campo es obligatorio.",
         "Si la sucursal no vende un producto, cargue 0.",
         "La importación es atómica: un solo error rechaza toda la planilla.",
@@ -125,14 +128,15 @@ def parse_sales_import(version: BudgetVersion, data: bytes, branch_id: str,
         i_code = headers.index("CODIGO")
         i_period = headers.index("PERIODO")
         i_ccy = headers.index("MONEDA")
-        i_value = headers.index("CANTIDAD") if "CANTIDAD" in headers else headers.index("MONTO")
+        i_value = (headers.index("VALOR") if "VALOR" in headers
+                   else headers.index("CANTIDAD") if "CANTIDAD" in headers
+                   else headers.index("MONTO"))
     except ValueError:
         return ImportResult("REJECTED", 0, [ImportError_(
             1, "encabezados", ",".join(headers), "La planilla no tiene la estructura esperada",
             "Descargue la plantilla desde el sistema y no modifique los encabezados.")]), []
 
     by_code = {p.code: p for p in unit.products}
-    unit_based = unit.sales_mode is SalesMode.UNIT_BASED
 
     for r in range(2, ws.max_row + 1):
         code = ws.cell(row=r, column=i_code + 1).value
@@ -148,19 +152,20 @@ def parse_sales_import(version: BudgetVersion, data: bytes, branch_id: str,
             errors.append(ImportError_(r, "CODIGO", code, "Producto inexistente en la unidad",
                                        f"Uno de: {', '.join(sorted(by_code))}"))
             continue
+        unit_based = product.sales_mode is SalesMode.UNIT_BASED
         if raw is None or str(raw).strip() == "":
             errors.append(ImportError_(
-                r, "CANTIDAD" if unit_based else "MONTO", "", "Celda vacía",
+                r, "VALOR", "", "Celda vacía",
                 "Un número. Si no corresponde, cargue 0 (0 es válido; vacío no)."))
             continue
         try:
             value = Decimal(str(raw).replace(",", "."))
         except (InvalidOperation, ValueError):
-            errors.append(ImportError_(r, "CANTIDAD" if unit_based else "MONTO", str(raw),
+            errors.append(ImportError_(r, "VALOR", str(raw),
                                        "No es un número", "Un valor numérico, sin texto ni símbolos"))
             continue
         if value < 0:
-            errors.append(ImportError_(r, "CANTIDAD" if unit_based else "MONTO", str(raw),
+            errors.append(ImportError_(r, "VALOR", str(raw),
                                        "Valor negativo", "Un valor mayor o igual a 0"))
             continue
         try:
@@ -180,7 +185,8 @@ def parse_sales_import(version: BudgetVersion, data: bytes, branch_id: str,
         parsed.append(InputValue(
             concept=Concept.SALES_QTY if unit_based else Concept.SALES_AMOUNT,
             period=period.code, value=value,
-            currency=None if unit_based else (ccy or unit.sales_currency),
+            currency=None if unit_based else (ccy if ccy and ccy != "UNIDADES"
+                                              else product.currency),
             business_unit_id=unit.id, branch_id=branch_id, product_id=product.id,
             source=InputSource.IMPORT, loaded_by=actor,
         ))

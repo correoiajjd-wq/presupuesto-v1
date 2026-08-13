@@ -16,10 +16,10 @@ from datetime import date
 from decimal import Decimal
 
 from app.domain.config import (
-    Allocation, BalanceConfig, BalanceItem, BalanceSection, BalanceSource, Branch,
+    AllocationMode, BalanceConfig, BalanceItem, BalanceSection, Branch,
     BusinessUnit, CapexCategory, CapexConfig, Configuration, CostCenter, ExpenseDefinition,
-    ExpenseLevel, InventoryConfig, InventoryLevel, MarginFormula, Objective, ObjectiveType,
-    PayrollArea, PayrollConfig, PayrollPercentageConcept, Product, ProductFamily,
+    ExpenseTarget, ExpenseTargetType, InventoryConfig, InventoryLevel, MarginFormula, Objective,
+    ObjectiveType, PayrollArea, PayrollConfig, PayrollPercentageConcept, Product, ProductFamily,
     RatioSelection, Role, SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowConfig, WorkflowStep,
 )
 from app.domain.inputs import ChangeType, Concept, InputSet, InputValue
@@ -40,65 +40,87 @@ def D(x) -> Decimal:
 # ==========================================================================
 def build_configuration() -> Configuration:
     repuestos = BusinessUnit(
-        id="BU-01", name="Repuestos", sales_mode=SalesMode.UNIT_BASED,
-        margin_formula=MarginFormula.PERCENTAGE_OF_SALES, sales_currency="USD",
-        branches=[
-            Branch(id="BR-01", name="Montevideo"),
-            Branch(id="BR-02", name="Salto", effective_from=date(2027, 6, 1)),
-        ],
+        id="BU-01", name="Repuestos", commission_rate=None,
         families=[
             ProductFamily(id="FAM-REP", name="Repuestos mecánicos"),
             ProductFamily(id="FAM-ACC", name="Accesorios"),
         ],
         products=[
             Product(id="P-001", code="P001", name="Filtros", family_id="FAM-REP",
-                    price=D(100), price_currency="USD", margin=D("0.30"),
+                    sales_mode=SalesMode.UNIT_BASED,
+                    margin_formula=MarginFormula.PERCENTAGE_OF_SALES,
+                    price=D(100), currency="USD", margin=D("0.30"),
                     sales_frequency=Frequency.MONTHLY),
             Product(id="P-002", code="P002", name="Frenos", family_id="FAM-REP",
-                    price=D(250), price_currency="USD", margin=D("0.25"),
+                    sales_mode=SalesMode.UNIT_BASED,
+                    margin_formula=MarginFormula.MARKUP_ON_COST,
+                    price=D(250), currency="USD", margin=D("0.35"),
                     sales_frequency=Frequency.QUARTERLY),
-            Product(id="P-099", code="XX", name="Otros", family_id="FAM-ACC",
-                    price=D(50), price_currency="USD", margin=D("0.20"),
-                    sales_frequency=Frequency.MONTHLY, is_other=True),
+            Product(id="P-003", code="XXREP", name="Otros repuestos", family_id="FAM-REP",
+                    sales_mode=SalesMode.UNIT_BASED, price=D(80), currency="USD",
+                    margin=D("0.25"), sales_frequency=Frequency.MONTHLY, is_other=True),
+            Product(id="P-099", code="XXACC", name="Otros accesorios", family_id="FAM-ACC",
+                    sales_mode=SalesMode.UNIT_BASED, price=D(50), currency="USD",
+                    margin=D("0.20"), sales_frequency=Frequency.MONTHLY, is_other=True),
         ],
     )
     servicios = BusinessUnit(
-        id="BU-02", name="Servicios", sales_mode=SalesMode.AMOUNT_BASED,
-        margin_formula=MarginFormula.PERCENTAGE_OF_SALES, sales_currency="UYU",
-        commission_rate=D("0.02"),
-        branches=[Branch(id="BR-03", name="Centro")],
+        id="BU-02", name="Servicios", commission_rate=D("0.02"),
         families=[ProductFamily(id="FAM-SVC", name="Servicios")],
         products=[
             Product(id="P-101", code="S001", name="Mantenimiento", family_id="FAM-SVC",
-                    price_currency="UYU", margin=D("0.40"), sales_frequency=Frequency.MONTHLY),
-            Product(id="P-199", code="XX", name="Otros", family_id="FAM-SVC",
-                    price_currency="UYU", margin=D("0.35"),
-                    sales_frequency=Frequency.MONTHLY, is_other=True),
+                    sales_mode=SalesMode.AMOUNT_BASED,
+                    margin_formula=MarginFormula.PERCENTAGE_OF_SALES,
+                    currency="UYU", margin=D("0.40"), sales_frequency=Frequency.MONTHLY),
+            # Intangible: el precio de venta es todo margen, no tiene costo asociado.
+            Product(id="P-102", code="S002", name="Consultoría", family_id="FAM-SVC",
+                    sales_mode=SalesMode.AMOUNT_BASED, margin_formula=MarginFormula.NO_COST,
+                    currency="UYU", margin=D(1), sales_frequency=Frequency.MONTHLY),
+            Product(id="P-199", code="XXSVC", name="Otros servicios", family_id="FAM-SVC",
+                    sales_mode=SalesMode.AMOUNT_BASED, currency="UYU",
+                    margin=D("0.35"), sales_frequency=Frequency.MONTHLY, is_other=True),
         ],
     )
+    branches = [
+        Branch(id="BR-01", name="Montevideo", business_unit_id="BU-01"),
+        Branch(id="BR-02", name="Salto", business_unit_id="BU-01",
+               effective_from=date(2027, 6, 1)),
+        Branch(id="BR-03", name="Centro", business_unit_id="BU-02"),
+    ]
     soporte = SupportUnit(id="SU-01", name="Administración central",
                           cost_centers=[CostCenter(id="CC-01", name="Administración")])
 
+    def target(kind: str, tid=None, pct=None, split=False) -> ExpenseTarget:
+        return ExpenseTarget(target_type=ExpenseTargetType(kind), target_id=tid,
+                             percentage=pct, distribute_to_branches=split)
+
     expenses = [
-        ExpenseDefinition(id="EXP-01", name="Alquiler Montevideo", level=ExpenseLevel.BRANCH,
-                          target_id="BR-01", currency="USD", frequency=Frequency.MONTHLY),
-        ExpenseDefinition(id="EXP-02", name="Marketing Repuestos",
-                          level=ExpenseLevel.BUSINESS_UNIT, target_id="BU-01",
-                          currency="USD", frequency=Frequency.QUARTERLY,
-                          distribute_to_branches=True),
-        ExpenseDefinition(id="EXP-03", name="Servicios administrativos",
-                          level=ExpenseLevel.COST_CENTER, target_id="CC-01",
-                          currency="UYU", frequency=Frequency.MONTHLY, corporate=True),
-        ExpenseDefinition(id="EXP-04", name="Seguros", level=ExpenseLevel.DISTRIBUTED,
-                          currency="USD", frequency=Frequency.ANNUAL,
-                          allocations=[
-                              Allocation(target_type="BUSINESS_UNIT", target_id="BU-01",
-                                         percentage=D("0.60")),
-                              Allocation(target_type="BUSINESS_UNIT", target_id="BU-02",
-                                         percentage=D("0.40")),
-                          ]),
-        ExpenseDefinition(id="EXP-05", name="Licencias corporativas", level=ExpenseLevel.COMPANY,
-                          currency="USD", frequency=Frequency.MONTHLY, corporate=True),
+        # Alquiler: Montevideo y las oficinas son alquiladas; Salto es propia y
+        # se carga 0. Un mismo concepto con varios destinos y montos distintos.
+        ExpenseDefinition(id="EXP-01", name="Alquiler", currency="USD",
+                          frequency=Frequency.MONTHLY,
+                          targets=[target("BRANCH", "BR-01"), target("BRANCH", "BR-02"),
+                                   target("COST_CENTER", "CC-01")]),
+        # Internet: existe en todas las sucursales y en administración.
+        ExpenseDefinition(id="EXP-02", name="Internet y comunicaciones", currency="USD",
+                          frequency=Frequency.MONTHLY,
+                          targets=[target("BRANCH", "BR-01"), target("BRANCH", "BR-02"),
+                                   target("BRANCH", "BR-03"), target("COST_CENTER", "CC-01")]),
+        # Marketing de la unidad, que se muestra repartido entre sus sucursales.
+        ExpenseDefinition(id="EXP-03", name="Marketing Repuestos", currency="USD",
+                          frequency=Frequency.QUARTERLY,
+                          targets=[target("BUSINESS_UNIT", "BU-01", split=True)]),
+        # Seguros: un único total que se reparte por porcentajes fijos.
+        ExpenseDefinition(id="EXP-04", name="Seguros", currency="USD",
+                          frequency=Frequency.ANNUAL,
+                          allocation_mode=AllocationMode.PERCENTAGE,
+                          targets=[target("BUSINESS_UNIT", "BU-01", pct=D("0.60")),
+                                   target("BUSINESS_UNIT", "BU-02", pct=D("0.40"))]),
+        ExpenseDefinition(id="EXP-05", name="Licencias corporativas", currency="USD",
+                          frequency=Frequency.MONTHLY, targets=[target("COMPANY")]),
+        ExpenseDefinition(id="EXP-06", name="Servicios administrativos", currency="UYU",
+                          frequency=Frequency.MONTHLY,
+                          targets=[target("COST_CENTER", "CC-01")]),
     ]
 
     payroll = PayrollConfig(
@@ -173,7 +195,8 @@ def build_configuration() -> Configuration:
         company_name="ACME Distribución S.A.",
         fiscal_year_start=FY_START, fiscal_year_end=FY_END,
         presentation_currency="USD", enabled_currencies=["USD", "UYU", "ARS"],
-        business_units=[repuestos, servicios], support_units=[soporte],
+        business_units=[repuestos, servicios], branches=branches,
+        support_units=[soporte],
         expenses=expenses, payroll=payroll,
         capex=CapexConfig(enabled=True, frequency=Frequency.MONTHLY,
                           categories=[CapexCategory(id="CAT-01", name="Maquinaria"),
@@ -195,55 +218,71 @@ def build_fx() -> FXTable:
 # ==========================================================================
 # Inputs
 # ==========================================================================
+def _expense(scope: str, expense_id: str, period: str, value: Decimal,
+             currency: str) -> InputValue:
+    """Un gasto se carga contra un destino concreto."""
+    iv = InputValue(concept=Concept.EXPENSE_AMOUNT, period=period, value=value,
+                    currency=currency, expense_id=expense_id)
+    if scope.startswith("BR:"):
+        iv.branch_id = scope.split(":", 1)[1]
+    elif scope.startswith("BU:"):
+        iv.business_unit_id = scope.split(":", 1)[1]
+    elif scope.startswith("CC:"):
+        iv.cost_center_id = scope.split(":", 1)[1]
+    return iv
+
+
 def build_inputs(cfg: Configuration) -> InputSet:
     s = InputSet()
     fy = cfg.fiscal_year
     months = fy.periods
 
     # ---- Ventas BU-01 (por unidades) ----
-    qty_p001 = {"BR-01": 2500, "BR-02": 900}
-    qty_p099 = {"BR-01": 600, "BR-02": 250}
-    qty_p002 = {"BR-01": 400, "BR-02": 150}
+    monthly_qty = {
+        ("BR-01", "P-001"): 2500, ("BR-01", "P-003"): 300, ("BR-01", "P-099"): 600,
+        ("BR-02", "P-001"): 900, ("BR-02", "P-003"): 120, ("BR-02", "P-099"): 250,
+    }
+    quarterly_qty = {("BR-01", "P-002"): 400, ("BR-02", "P-002"): 150}
     for branch_id in ("BR-01", "BR-02"):
-        branch = cfg.unit("BU-01").branch(branch_id)
+        branch = cfg.branch(branch_id)
         for p in months:
             if not cfg.is_active(branch, p):
                 continue
-            s.add(InputValue(concept=Concept.SALES_QTY, period=p.code,
-                             value=D(qty_p001[branch_id]), business_unit_id="BU-01",
-                             branch_id=branch_id, product_id="P-001"))
-            s.add(InputValue(concept=Concept.SALES_QTY, period=p.code,
-                             value=D(qty_p099[branch_id]), business_unit_id="BU-01",
-                             branch_id=branch_id, product_id="P-099"))
+            for (b, prod), q in monthly_qty.items():
+                if b != branch_id:
+                    continue
+                s.add(InputValue(concept=Concept.SALES_QTY, period=p.code, value=D(q),
+                                 business_unit_id="BU-01", branch_id=branch_id, product_id=prod))
         for head, bucket in fy.iter_buckets(Frequency.QUARTERLY):
             if not any(cfg.is_active(branch, p) for p in bucket):
                 continue
-            s.add(InputValue(concept=Concept.SALES_QTY, period=head.code,
-                             value=D(qty_p002[branch_id]), business_unit_id="BU-01",
-                             branch_id=branch_id, product_id="P-002"))
+            for (b, prod), q in quarterly_qty.items():
+                if b != branch_id:
+                    continue
+                s.add(InputValue(concept=Concept.SALES_QTY, period=head.code, value=D(q),
+                                 business_unit_id="BU-01", branch_id=branch_id, product_id=prod))
 
     # ---- Ventas BU-02 (por monto, en UYU) ----
+    amounts = {"P-101": 12_000_000, "P-102": 1_500_000, "P-199": 1_200_000}
     for p in months:
-        s.add(InputValue(concept=Concept.SALES_AMOUNT, period=p.code, value=D(12_000_000),
-                         currency="UYU", business_unit_id="BU-02", branch_id="BR-03",
-                         product_id="P-101"))
-        s.add(InputValue(concept=Concept.SALES_AMOUNT, period=p.code, value=D(1_200_000),
-                         currency="UYU", business_unit_id="BU-02", branch_id="BR-03",
-                         product_id="P-199"))
+        for prod, amount in amounts.items():
+            s.add(InputValue(concept=Concept.SALES_AMOUNT, period=p.code, value=D(amount),
+                             currency="UYU", business_unit_id="BU-02", branch_id="BR-03",
+                             product_id=prod))
 
-    # ---- Gastos ----
+    # ---- Gastos: un importe por destino; 0 donde no corresponde ----
+    alquiler = {"BR:BR-01": 8_000, "BR:BR-02": 0, "CC:CC-01": 2_500}   # Salto es propia
+    internet = {"BR:BR-01": 600, "BR:BR-02": 350, "BR:BR-03": 500, "CC:CC-01": 400}
     for p in months:
-        s.add(InputValue(concept=Concept.EXPENSE_AMOUNT, period=p.code, value=D(8_000),
-                         currency="USD", expense_id="EXP-01"))
-        s.add(InputValue(concept=Concept.EXPENSE_AMOUNT, period=p.code, value=D(900_000),
-                         currency="UYU", expense_id="EXP-03"))
-        s.add(InputValue(concept=Concept.EXPENSE_AMOUNT, period=p.code, value=D(3_500),
-                         currency="USD", expense_id="EXP-05"))
+        for scope, amount in alquiler.items():
+            s.add(_expense(scope, "EXP-01", p.code, D(amount), "USD"))
+        for scope, amount in internet.items():
+            s.add(_expense(scope, "EXP-02", p.code, D(amount), "USD"))
+        s.add(_expense("CO", "EXP-05", p.code, D(3_500), "USD"))
+        s.add(_expense("CC:CC-01", "EXP-06", p.code, D(900_000), "UYU"))
     for head, _ in fy.iter_buckets(Frequency.QUARTERLY):
-        s.add(InputValue(concept=Concept.EXPENSE_AMOUNT, period=head.code, value=D(30_000),
-                         currency="USD", expense_id="EXP-02"))
-    s.add(InputValue(concept=Concept.EXPENSE_AMOUNT, period=months[0].code, value=D(48_000),
-                     currency="USD", expense_id="EXP-04"))
+        s.add(_expense("BU:BU-01", "EXP-03", head.code, D(30_000), "USD"))
+    s.add(_expense("CO", "EXP-04", months[0].code, D(48_000), "USD"))   # total, se reparte 60/40
 
     # ---- Nómina ----
     s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(5),

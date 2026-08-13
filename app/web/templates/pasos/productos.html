@@ -3,20 +3,25 @@
 de Estructura. Los productos pertenecen a una unidad.</p></div>
 {% else %}
 {% for u in cfg.business_units %}
-<h3>{{ u.name }} — {{ 'venta por unidades' if u.sales_mode.value=='UNIT_BASED' else 'venta por monto' }}</h3>
+<h3>{{ u.name }}</h3>
 <div class="panel">
-  <table><thead><tr><th>Familia</th><th>Productos</th><th></th></tr></thead><tbody>
+  <table><thead><tr><th>Familia</th><th>Productos</th><th>Otros</th><th></th></tr></thead><tbody>
   {% for f in u.families %}
+  {% set otros = u.products|selectattr('family_id','equalto',f.id)|selectattr('is_other')|list %}
   <tr><td>{{ f.name }} <span class="small">{{ f.id }}</span></td>
     <td class="small">{{ u.products|selectattr('family_id','equalto',f.id)|map(attribute='name')|join(', ') or '—' }}</td>
+    <td>{% if otros %}<span class="tag ok">{{ otros[0].code }}</span>
+        {% else %}<span class="tag bad">falta</span>{% endif %}</td>
     <td>{% if editable %}<form method="post"
         action="{{ url_for('configurar_borrar', step='productos', kind='family', entity_id=f.id) }}">
         <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
   {% else %}
-  <tr><td colspan="3" class="small">Sin familias. Cada producto pertenece a una única familia,
+  <tr><td colspan="4" class="small">Sin familias. Cada producto pertenece a una única familia,
     y las familias son las que gobiernan el stock.</td></tr>
   {% endfor %}
   </tbody></table>
+  <p class="small">Cada familia necesita su propio producto "Otros": es el cajón de lo que no
+  está en el catálogo, y tiene que existir uno por familia, no uno por unidad.</p>
 
   {% if editable %}
   <form method="post" action="{{ url_for('configurar_accion', step='productos', action='familia') }}"
@@ -28,30 +33,27 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
   {% endif %}
 
   <table style="margin-top:18px">
-  <thead><tr><th>Código</th><th>Producto</th><th>Familia</th>
-    {% if u.sales_mode.value=='UNIT_BASED' %}<th>Precio</th>{% endif %}
-    <th>Margen</th><th>Frecuencia</th><th></th></tr></thead><tbody>
+  <thead><tr><th>Código</th><th>Producto</th><th>Familia</th><th>Modalidad</th>
+    <th>Precio</th><th>Margen</th><th>Frecuencia</th><th></th></tr></thead><tbody>
   {% for p in u.products %}
   <tr>
     <td>{{ p.code }}{% if p.is_other %} <span class="tag na">Otros</span>{% endif %}</td>
     <td>{{ p.name }}</td>
-    <td class="small">{{ (u.families|selectattr('id','equalto',p.family_id)|first).name }}</td>
-    {% if u.sales_mode.value=='UNIT_BASED' %}<td>{{ p.price }} {{ p.price_currency }}</td>{% endif %}
-    <td>{{ (p.margin*100)|round(1) }}%</td>
+    <td class="small">{{ u.family(p.family_id).name }}</td>
+    <td class="small">{{ 'por unidades' if p.sales_mode.value=='UNIT_BASED' else 'por monto' }}</td>
+    <td>{{ (p.price ~ ' ' ~ p.currency) if p.sales_mode.value=='UNIT_BASED' else p.currency }}</td>
+    <td>{% if p.margin_formula.value=='NO_COST' %}<span class="tag ok">sin costo</span>
+        {% else %}{{ (p.margin*100)|round(1) }}%
+        <span class="small">{{ 'sobre ventas' if p.margin_formula.value=='PERCENTAGE_OF_SALES' else 'markup' }}</span>{% endif %}</td>
     <td class="small">{{ p.sales_frequency.value|lower }}</td>
     <td>{% if editable %}<form method="post"
         action="{{ url_for('configurar_borrar', step='productos', kind='product', entity_id=p.id) }}">
         <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="small">Sin productos.</td></tr>
+  <tr><td colspan="8" class="small">Sin productos.</td></tr>
   {% endfor %}
   </tbody></table>
-
-  {% if not u.products|selectattr('is_other')|list %}
-  <p class="small" style="color:var(--warn)">Falta el producto obligatorio "Otros": toda unidad
-  tiene que tener uno, para que lo que no entra en el catálogo tenga dónde ir.</p>
-  {% endif %}
 
   {% if editable and u.families %}
   <form method="post" action="{{ url_for('configurar_accion', step='productos', action='producto') }}"
@@ -64,27 +66,33 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
       <div style="flex:1"><label class="small">Familia</label>
         <select name="family_id">
           {% for f in u.families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select></div>
+      <div style="align-self:end"><label><input type="checkbox" name="is_other" value="1"
+        style="width:auto"> Es el "Otros" de esa familia</label></div>
     </div>
     <div class="row" style="margin-top:10px">
-      {% if u.sales_mode.value=='UNIT_BASED' %}
+      <div style="flex:1"><label class="small">Modalidad de venta</label>
+        <select name="sales_mode"><option value="UNIT_BASED">Por unidades (se carga cantidad)</option>
+          <option value="AMOUNT_BASED">Por monto (se carga importe)</option></select></div>
+      <div style="flex:1"><label class="small">Fórmula de margen</label>
+        <select name="margin_formula"><option value="PERCENTAGE_OF_SALES">% sobre ventas</option>
+          <option value="MARKUP_ON_COST">Markup sobre costo</option>
+          <option value="NO_COST">Sin costo — el precio es todo margen</option></select></div>
       <div style="width:130px"><label class="small">Precio</label>
-        <input type="number" step="any" name="price" required></div>
+        <input type="number" step="any" name="price" placeholder="0"></div>
       <div style="width:110px"><label class="small">Moneda</label>
-        <select name="price_currency">
-        {% for c in cfg.enabled_currencies %}<option {{ 'selected' if c==u.sales_currency }}>{{ c }}</option>{% endfor %}</select></div>
-      {% endif %}
-      <div style="width:120px"><label class="small">Margen %</label>
-        <input type="number" step="any" name="margin" required placeholder="30"></div>
-      <div style="width:160px"><label class="small">Frecuencia de carga</label>
+        <select name="currency">
+        {% for c in cfg.enabled_currencies %}<option>{{ c }}</option>{% endfor %}</select></div>
+      <div style="width:110px"><label class="small">Margen %</label>
+        <input type="number" step="any" name="margin" placeholder="30"></div>
+      <div style="width:150px"><label class="small">Frecuencia</label>
         <select name="sales_frequency">
           <option value="MONTHLY">Mensual</option><option value="QUARTERLY">Trimestral</option>
           <option value="SEMIANNUAL">Semestral</option><option value="ANNUAL">Anual</option></select></div>
-      <div style="align-self:end"><label class="small">
-        <input type="checkbox" name="is_other" value="1" style="width:auto"> Es el producto "Otros"</label></div>
     </div>
-    <p class="small" style="margin-top:8px">En V1 precio y margen son constantes durante el
-    ejercicio; lo que varía es la cantidad. Si un producto se carga trimestralmente y el valor
-    cambia mes a mes, poné frecuencia mensual.</p>
+    <p class="small" style="margin-top:8px">El precio sólo hace falta si la venta es por unidades.
+    Con la fórmula "sin costo" el margen queda en 100% — es el caso de un intangible, donde el
+    precio de venta no tiene costo asociado. En V1 precio y margen son constantes en el ejercicio;
+    lo que varía es la cantidad.</p>
     <button style="margin-top:6px">Agregar producto</button>
   </form>
   {% endif %}

@@ -9,7 +9,10 @@ import unittest
 from datetime import date
 from decimal import Decimal
 
-from app.domain.config import ConfigStatus, ConfigurationError, ExpenseDefinition, ExpenseLevel, Allocation
+from app.domain.config import (
+    AllocationMode, ConfigStatus, ConfigurationError, ExpenseDefinition, ExpenseTarget,
+    ExpenseTargetType, MarginFormula, SalesMode,
+)
 from app.domain.engine import FY, BudgetEngine, scope_br, scope_bu, scope_co, scope_stock
 from app.domain.graph import nk
 from app.domain.inputs import Concept, InputSet, InputValue
@@ -78,24 +81,42 @@ class TestFX(unittest.TestCase):
 
 
 class TestConfiguration(unittest.TestCase):
-    def test_producto_otros_obligatorio(self):
-        """Doc 02 §8: XX — Otros es obligatorio."""
+    def test_otros_obligatorio_por_familia(self):
+        """Doc 02 §8/§9: el 'Otros' se controla por familia, no por unidad."""
         cfg = build_configuration()
-        data = cfg.model_dump()
-        for p in data["business_units"][0]["products"]:
-            p["is_other"] = False
-        with self.assertRaises(Exception):
-            type(cfg)(**data)
+        unidad = cfg.business_units[0]
+        self.assertEqual(unidad.missing_other_products(), [])
+        # sacarle el "Otros" a una sola familia ya deja la configuración incompleta
+        unidad.products = [p for p in unidad.products if p.code != "XXACC"]
+        faltantes = [f.name for f in unidad.missing_other_products()]
+        self.assertEqual(faltantes, ["Accesorios"])
+        self.assertTrue(any("Accesorios" in e for e in cfg.validate_structure()))
+
+    def test_dos_otros_en_la_misma_familia_se_rechaza(self):
+        cfg = build_configuration()
+        unidad = cfg.business_units[0]
+        data = unidad.model_dump()
+        data["products"].append({**data["products"][-1], "id": "P-900", "code": "ZZ",
+                                 "family_id": "FAM-ACC", "is_other": True})
+        with self.assertRaises(Exception) as ctx:
+            type(unidad)(**data)
+        self.assertIn("DUPLICATE_OTHER_PRODUCT", str(ctx.exception))
 
     def test_distribucion_debe_sumar_100(self):
         """Doc 02 §21."""
         with self.assertRaises(Exception) as ctx:
             ExpenseDefinition(
-                id="X", name="X", level=ExpenseLevel.DISTRIBUTED, currency="USD",
-                allocations=[Allocation(target_type="BUSINESS_UNIT", target_id="BU-01",
-                                        percentage=D("0.5"))],
+                id="X", name="X", currency="USD",
+                allocation_mode=AllocationMode.PERCENTAGE,
+                targets=[ExpenseTarget(target_type=ExpenseTargetType.BUSINESS_UNIT,
+                                       target_id="BU-01", percentage=D("0.5"))],
             )
         self.assertIn("INVALID_ALLOCATION", str(ctx.exception))
+
+    def test_gasto_sin_destino_se_rechaza(self):
+        with self.assertRaises(Exception) as ctx:
+            ExpenseDefinition(id="X", name="Internet", currency="USD", targets=[])
+        self.assertIn("INVALID_EXPENSE", str(ctx.exception))
 
     def test_ratio_arrastra_dependencias(self):
         """Doc 02 §37: elegir un ratio de stock exige configurar stock."""
@@ -133,15 +154,27 @@ class TestSalesAndMargin(unittest.TestCase):
         self.assertEqual(v, D(12_000_000) * D("0.025"))
 
     def test_margen_markup_sobre_costo(self):
-        """Doc 02 §11: la fórmula de margen es configuración."""
-        from app.domain.config import MarginFormula
-        cfg = build_configuration()
-        cfg.business_units[0].margin_formula = MarginFormula.MARKUP_ON_COST
-        inputs = build_inputs(cfg)
-        values = BudgetEngine(cfg, build_fx(), inputs).build().evaluate()
-        sales = val(values, "SALES", "BR:BR-01#P:P-001", "2027-01")
-        cogs = val(values, "COGS", "BR:BR-01#P:P-001", "2027-01")
-        self.assertAlmostEqual(float(cogs), float(sales / (Decimal(1) + D("0.30"))), places=6)
+        """Doc 02 §11: la fórmula de margen es configuración, y es del producto."""
+        sales = val(self.values, "SALES", "BR:BR-01#P:P-002", "2027-01")
+        cogs = val(self.values, "COGS", "BR:BR-01#P:P-002", "2027-01")
+        self.assertAlmostEqual(float(cogs), float(sales / (Decimal(1) + D("0.35"))), places=6)
+
+    def test_producto_sin_costo(self):
+        """Un intangible: el precio de venta es todo margen."""
+        sales = val(self.values, "SALES", "BR:BR-03#P:P-102", "2027-01")
+        cogs = val(self.values, "COGS", "BR:BR-03#P:P-102", "2027-01")
+        self.assertGreater(sales, 0)
+        self.assertEqual(cogs, D(0))
+
+    def test_modalidad_es_del_producto_no_de_la_unidad(self):
+        """La misma unidad puede tener productos por unidades y por monto."""
+        modos = {p.sales_mode.value for u in self.version.configuration.business_units
+                 for p in u.products}
+        self.assertEqual(modos, {"UNIT_BASED", "AMOUNT_BASED"})
+        formulas = {p.margin_formula.value for u in self.version.configuration.business_units
+                    for p in u.products}
+        self.assertIn("MARKUP_ON_COST", formulas)
+        self.assertIn("NO_COST", formulas)
 
     def test_frecuencia_trimestral_se_distribuye(self):
         """Doc 02 §13: si se carga en frecuencia mayor, se distribuye equitativamente."""
@@ -223,17 +256,38 @@ class TestExpenses(unittest.TestCase):
         bu01 = val(self.values, "EXPENSES_UNIT_LEVEL", scope_bu("BU-01"))
         self.assertGreaterEqual(bu01, total * D("0.60") - D("0.01"))
 
+    def test_un_gasto_va_a_varios_destinos(self):
+        """Internet existe en las tres sucursales y en administración."""
+        internet = self.cfg.expense("EXP-02")
+        destinos = {t.scope_key for t in internet.targets}
+        self.assertEqual(destinos, {"BR:BR-01", "BR:BR-02", "BR:BR-03", "CC:CC-01"})
+        # cada destino tiene su propio importe
+        self.assertEqual(val(self.values, "EXPENSE_INPUT", "EXP:EXP-02@BR:BR-01", "2027-01"),
+                         D(600))
+        self.assertEqual(val(self.values, "EXPENSE_INPUT", "EXP:EXP-02@BR:BR-03", "2027-01"),
+                         D(500))
+
+    def test_donde_no_corresponde_se_carga_cero(self):
+        """Salto es propia: el alquiler existe como concepto pero vale 0."""
+        self.assertEqual(val(self.values, "EXPENSE_INPUT", "EXP:EXP-01@BR:BR-02", "2027-01"),
+                         D(0))
+        self.assertGreater(val(self.values, "EXPENSE_INPUT", "EXP:EXP-01@BR:BR-01", "2027-01"),
+                           D(0))
+
     def test_gasto_de_unidad_se_distribuye_proporcional_a_ventas(self):
         """Doc 02 §22: proporcional al volumen total de ventas."""
         s1 = val(self.values, "SALES", scope_br("BR-01"))
         s2 = val(self.values, "SALES", scope_br("BR-02"))
         e1 = val(self.values, "EXPENSES", scope_br("BR-01"))
         e2 = val(self.values, "EXPENSES", scope_br("BR-02"))
-        # BR-01 tiene además el alquiler propio: comparamos sólo la parte de marketing
+        # cada sucursal tiene además sus gastos propios; comparamos la parte de marketing
         marketing = D(120_000)
-        parte1 = marketing * s1 / (s1 + s2)
-        self.assertAlmostEqual(float(e1 - D(96_000)), float(parte1), places=2)
-        self.assertAlmostEqual(float(e2), float(marketing * s2 / (s1 + s2)), places=2)
+        propios_1 = D(8_000 + 600) * 12          # alquiler + internet
+        propios_2 = D(0 + 350) * 12
+        self.assertAlmostEqual(float(e1 - propios_1),
+                               float(marketing * s1 / (s1 + s2)), places=2)
+        self.assertAlmostEqual(float(e2 - propios_2),
+                               float(marketing * s2 / (s1 + s2)), places=2)
         self.assertGreater(e1, e2)
 
     def test_corporativos_se_muestran_debajo_del_ebitda(self):
@@ -275,9 +329,11 @@ class TestInventory(unittest.TestCase):
         """Doc 02 §27: productos -> familias -> costo de venta consolidado."""
         sc = scope_stock(scope_br("BR-01"), "FAM-REP")
         fam = val(self.values, "COGS_FAMILY", sc, "2027-01")
-        p1 = val(self.values, "COGS", "BR:BR-01#P:P-001", "2027-01")
-        p2 = val(self.values, "COGS", "BR:BR-01#P:P-002", "2027-01")
-        self.assertEqual(fam, p1 + p2)
+        unidad = self.version.configuration.unit("BU-01")
+        productos = [p.id for p in unidad.products if p.family_id == "FAM-REP"]
+        suma = sum(val(self.values, "COGS", f"BR:BR-01#P:{pid}", "2027-01")
+                   for pid in productos)
+        self.assertEqual(fam, suma)
 
 
 class TestBalance(unittest.TestCase):
@@ -551,9 +607,10 @@ class TestImport(unittest.TestCase):
         data = sales_template(self.version, "BR-01")
         wb = load_workbook(BytesIO(data))
         ws = wb["Carga"]
+        col = [c.value for c in ws[1]].index("VALOR") + 1
         for r in range(2, ws.max_row + 1):
-            ws.cell(row=r, column=8).value = 10
-        ws.cell(row=3, column=8).value = "diez"     # error en una fila
+            ws.cell(row=r, column=col).value = 10
+        ws.cell(row=3, column=col).value = "diez"     # error en una fila
         buf = BytesIO(); wb.save(buf)
 
         result, parsed = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
@@ -570,8 +627,9 @@ class TestImport(unittest.TestCase):
 
         data = sales_template(self.version, "BR-01")
         wb = load_workbook(BytesIO(data)); ws = wb["Carga"]
+        col = [c.value for c in ws[1]].index("VALOR") + 1
         for r in range(2, ws.max_row + 1):
-            ws.cell(row=r, column=8).value = 0
+            ws.cell(row=r, column=col).value = 0
         buf = BytesIO(); wb.save(buf)
         result, parsed = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
         self.assertEqual(result.status, "COMMITTED")
@@ -579,8 +637,8 @@ class TestImport(unittest.TestCase):
 
         wb = load_workbook(BytesIO(data)); ws = wb["Carga"]
         for r in range(2, ws.max_row + 1):
-            ws.cell(row=r, column=8).value = 0
-        ws.cell(row=2, column=8).value = None
+            ws.cell(row=r, column=col).value = 0
+        ws.cell(row=2, column=col).value = None
         buf = BytesIO(); wb.save(buf)
         result, _ = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
         self.assertEqual(result.status, "REJECTED")

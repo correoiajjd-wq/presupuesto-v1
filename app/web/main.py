@@ -364,6 +364,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
                      and v.configuration.status.value != "LOCKED" and v.mutable,
             catalog=RATIO_CATALOG, report=report, users=list(service.users.values()),
             scope_options=wizard.scope_options(v.configuration),
+            expense_targets=wizard.expense_target_options(v.configuration),
             workflow_concepts=wizard.WORKFLOW_CONCEPTS,
             findings=validate_configuration(v.configuration, v.fx),
             frequencies=[f.value for f in Frequency], roles=[r.value for r in Role])
@@ -378,6 +379,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         handlers = {
             "general": wizard.update_general, "fx": wizard.set_fx_rate,
             "unidad": wizard.add_business_unit, "sucursal": wizard.add_branch,
+            "asignar": wizard.assign_branch,
             "soporte": wizard.add_support_unit, "centro": wizard.add_cost_center,
             "familia": wizard.add_family, "producto": wizard.add_product,
             "gasto": wizard.add_expense, "area": wizard.add_payroll_area,

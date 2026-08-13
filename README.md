@@ -4,12 +4,12 @@ Implementación funcionando de la parte que decide si el sistema sirve o no:
 **configuración → inputs → grafo de dependencias → cálculo → validación → workflow → versión**.
 
 No es el producto terminado. Es el motor, con la cadena completa andando de punta a punta
-sobre una empresa demo, y 84 tests que verifican reglas concretas del spec.
+sobre una empresa demo, y 90 tests que verifican reglas concretas del spec.
 
 ```
 PYTHONPATH=. python3 wsgi.py                           # interfaz web en :8000
 PYTHONPATH=. python3 run_demo.py --html reporte.html   # recorrido end-to-end por consola
-PYTHONPATH=. python3 -m unittest discover -s tests     # 84 tests
+PYTHONPATH=. python3 -m unittest discover -s tests     # 90 tests
 ```
 
 ---
@@ -99,6 +99,15 @@ Las que más costó dejar bien:
   erráticas). La asignación es presentacional: se muestra debajo del EBITDA propio, y
   `Σ(resultado después de asignación de cada unidad) = EBITDA de la empresa`. Hay un test
   que verifica esa identidad.
+- **Un gasto, varios destinos.** Internet existe en todas las sucursales y en administración;
+  el alquiler sólo en las sucursales que no son propias. Un gasto tiene una lista de destinos
+  y dos modos de carga: un importe por cada destino (donde no corresponde se carga 0) o un
+  total que se reparte con porcentajes fijos.
+- **La fórmula de margen incluye "sin costo".** Para intangibles, donde el precio de venta es
+  todo margen: el costo es 0 y el margen 100%. El motor trabaja con la proporción de costo de
+  cada producto, así que las tres fórmulas conviven en la misma unidad.
+- **El producto "Otros" es por familia, no por unidad.** Cada familia necesita su propio cajón
+  para lo que no está en el catálogo; dos "Otros" en la misma familia se rechazan.
 - **Balance.** El total de patrimonio es calculado (`Activo − Pasivo`); los componentes
   (capital, resultados acumulados) se cargan, y si no coinciden con ese total el balance no
   cierra y **se rechaza la carga completa**. Es la única lectura de los §26 y §34 que no se
@@ -184,11 +193,15 @@ sesiones y entre varias personas, y cada paso dice de quién es:
 1. **Datos generales** — empresa, ejercicio (cualquier fecha de inicio y fin), monedas
    habilitadas y tipos de cambio. El TC se guarda día por día; para no cargar 365 valores
    se pide el estimado de inicio y el de cierre, y el sistema interpola.
-2. **Estructura** — unidades de negocio, sucursales, unidades de soporte y centros de costo,
-   cada uno con su fecha de apertura y cierre dentro del ejercicio.
-3. **Productos y familias** — lo define el **COO**: catálogo por unidad, modalidad de venta
-   (por unidades o por monto), fórmula de margen, precio, margen y frecuencia de carga.
-4. **Gastos** — qué existe, dónde se imputa, con qué frecuencia y moneda, y si se reparte.
+2. **Estructura** — primero se dan de alta las **sucursales** como catálogo de la empresa,
+   después las unidades de negocio, y recién ahí se asocia cada sucursal a su unidad
+   eligiendo ambas de un selector. Así el nombre de una sucursal existe una sola vez y no
+   se duplica por tipeo. Una sucursal sin unidad no genera cargas y no deja cerrar.
+3. **Productos y familias** — lo define el **COO**. La modalidad de venta y la fórmula de
+   margen son **de cada producto**, no de la unidad: la misma unidad puede vender mercadería
+   por unidades y servicios por monto. Cada familia necesita su propio producto "Otros".
+4. **Gastos** — qué existe, a qué **destinos** se imputa (varios a la vez), con qué
+   frecuencia y moneda.
 5. **Nómina** — áreas con su sueldo base, reglas de aumento y conceptos porcentuales.
 6. **CAPEX, Stock y Balance** — módulos opcionales. Lo que no se configura, no se pide.
 7. **Ratios y objetivos** — se eligen del catálogo de 23; cada uno arrastra sus dependencias.

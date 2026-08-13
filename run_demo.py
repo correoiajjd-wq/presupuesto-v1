@@ -63,13 +63,11 @@ def main() -> None:
     print_pnl(cfg, values, scope_co(), f"CONSOLIDADO — {cfg.company_name} (USD)")
     for u in cfg.business_units:
         print_pnl(cfg, values, scope_bu(u.id), f"UNIDAD — {u.name}")
-    for u in cfg.business_units:
-        for b in u.branches:
+    for u, b in cfg.all_branches():
             print_pnl(cfg, values, f"BR:{b.id}", f"SUCURSAL — {u.name} / {b.name}")
 
     section("4. DOTACIÓN (doc 02 §54)")
-    for u in cfg.business_units:
-        for b in u.branches:
+    for u, b in cfg.all_branches():
             h = reporting.headcount_summary(cfg, values, f"BR:{b.id}")
             print(f"  {u.name} / {b.name:<22} inicial {h['initial']:>4}  final {h['final']:>4}  "
                   f"variación {h['net_change']:>+4}  costo {money(h['payroll_cost'])}")

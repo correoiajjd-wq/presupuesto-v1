@@ -15,7 +15,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
-from .config import Configuration, BalanceSection, BalanceSource, ExpenseLevel
+from .config import AllocationMode, Configuration, BalanceSection, BalanceSource, ExpenseTargetType
 from .engine import FY, scope_br, scope_bu, scope_co, scope_su
 from .graph import nk
 from .inputs import Concept, InputSet
@@ -108,9 +108,8 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
 
         if iv.concept in (Concept.SALES_QTY, Concept.SALES_AMOUNT):
             try:
-                unit = cfg.unit(iv.business_unit_id or "")
+                unit = cfg.branch_owner(iv.branch_id or "")
                 product = unit.product(iv.product_id or "")
-                unit.branch(iv.branch_id or "")
             except Exception as exc:
                 out.append(Finding("INVALID_PRODUCT", f"{tag}: {exc}", Severity.BLOCKING, tag))
                 continue
@@ -177,28 +176,37 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                for iv in inputs.values}
 
     if "SALES" in required:
-        for unit in cfg.business_units:
-            concept = Concept.SALES_QTY if unit.sales_mode.value == "UNIT_BASED" else Concept.SALES_AMOUNT
-            for b in unit.branches:
-                for product in unit.products:
-                    for head, bucket in fy.iter_buckets(product.sales_frequency):
-                        if not any(cfg.is_active(b, p) for p in bucket):
-                            continue
-                        key = (concept, scope_br(b.id), product.id, None, None, head.code)
-                        if key not in present:
-                            out.append(Finding(
-                                "MISSING_REQUIRED_INPUT",
-                                f"Ventas: falta {product.code} en {b.name} para {head.code}",
-                                Severity.BLOCKING, scope_br(b.id)))
+        for unit, b in cfg.all_branches():
+            for product in unit.products:
+                concept = (Concept.SALES_QTY if product.sales_mode.value == "UNIT_BASED"
+                           else Concept.SALES_AMOUNT)
+                for head, bucket in fy.iter_buckets(product.sales_frequency):
+                    if not any(cfg.is_active(b, p) for p in bucket):
+                        continue
+                    key = (concept, scope_br(b.id), product.id, None, None, head.code)
+                    if key not in present:
+                        out.append(Finding(
+                            "MISSING_REQUIRED_INPUT",
+                            f"Ventas: falta {product.code} en {b.name} para {head.code}",
+                            Severity.BLOCKING, scope_br(b.id)))
 
     if "EXPENSES" in required:
+        # En PER_TARGET hay que cargar un importe por cada destino — 0 si no
+        # corresponde. En PERCENTAGE alcanza con el total.
         for ed in cfg.expenses:
+            scopes = ([t.scope_key for t in ed.targets]
+                      if ed.allocation_mode is AllocationMode.PER_TARGET else ["CO"])
             for head, _ in fy.iter_buckets(ed.frequency):
-                if not any(iv.concept is Concept.EXPENSE_AMOUNT and iv.expense_id == ed.id
-                           and iv.period == head.code for iv in inputs.values):
-                    out.append(Finding("MISSING_REQUIRED_INPUT",
-                                       f"Gastos: falta {ed.name} para {head.code}",
-                                       Severity.BLOCKING, f"EXP:{ed.id}"))
+                for scope in scopes:
+                    if not any(iv.concept is Concept.EXPENSE_AMOUNT and iv.expense_id == ed.id
+                               and iv.period == head.code and iv.scope_key == scope
+                               for iv in inputs.values):
+                        detalle = (f" en {cfg.scope_label(scope)}"
+                                   if ed.allocation_mode is AllocationMode.PER_TARGET else "")
+                        out.append(Finding(
+                            "MISSING_REQUIRED_INPUT",
+                            f"Gastos: falta {ed.name}{detalle} para {head.code}",
+                            Severity.BLOCKING, f"EXP:{ed.id}"))
 
     if "OPENING_STOCK" in required and cfg.inventory.enabled:
         from .engine import BudgetEngine  # noqa: F401  (sólo para tipar mentalmente)
@@ -306,13 +314,16 @@ def collect_assumptions(cfg: Configuration) -> list[str]:
         "Los valores cargados con frecuencia menor a la mensual se distribuyen en partes iguales.",
         "Los flujos se convierten con el TC promedio del período; los stocks, con el TC de cierre.",
     ]
-    if any(e.distribute_to_branches for e in cfg.expenses):
+    if any(p.margin_formula.value == "NO_COST" for u in cfg.business_units for p in u.products):
+        out.append(
+            "Hay productos configurados sin costo: su precio de venta es todo margen. "
+            "Es el caso de los intangibles.")
+    if any(t.distribute_to_branches for e in cfg.expenses for t in e.targets):
         out.append(
             "Los gastos de unidad distribuidos a sucursales usan como driver las ventas "
             "anuales de cada sucursal; una sucursal sin ventas no recibe asignación."
         )
-    if any(e.level is ExpenseLevel.COMPANY or e.level is ExpenseLevel.COST_CENTER
-           for e in cfg.expenses):
+    if any(t.corporate for e in cfg.expenses for t in e.targets):
         out.append(
             "Los gastos de empresa y de las áreas de soporte se muestran asignados a las "
             "unidades por debajo del EBITDA propio; no forman parte del EBITDA de la unidad."

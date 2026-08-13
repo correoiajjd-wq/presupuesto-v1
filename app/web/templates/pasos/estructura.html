@@ -1,85 +1,107 @@
-<h3>Unidades de negocio</h3>
+<h3>1. Sucursales de la empresa</h3>
 <div class="panel">
-<table><thead><tr><th>Unidad</th><th>Modalidad</th><th>Vigencia</th><th>Sucursales</th><th></th></tr></thead><tbody>
+<p class="small">Se dan de alta acá una sola vez, con su nombre definitivo. Después se asignan
+a una unidad de negocio: así el nombre nunca se escribe dos veces ni se confunde.</p>
+<table><thead><tr><th>Sucursal</th><th>Unidad asignada</th><th>Vigencia</th><th></th></tr></thead>
+<tbody>
+{% for b in cfg.branches %}
+<tr>
+  <td>{{ b.name }} <span class="small">{{ b.id }}</span></td>
+  <td>{% if b.assigned %}{{ cfg.unit(b.business_unit_id).name }}
+      {% else %}<span class="tag warn">sin asignar</span>{% endif %}</td>
+  <td class="small">{{ b.effective_from or 'todo el ejercicio' }}{% if b.effective_to %} → {{ b.effective_to }}{% endif %}</td>
+  <td>{% if editable %}<form method="post"
+      action="{{ url_for('configurar_borrar', step='estructura', kind='branch', entity_id=b.id) }}">
+      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="4" class="small">Todavía no hay sucursales.</td></tr>
+{% endfor %}
+</tbody></table>
+
+{% if editable %}
+<form method="post" action="{{ url_for('configurar_accion', step='estructura', action='sucursal') }}"
+      class="row" style="margin-top:14px">
+  <input type="text" name="name" placeholder="Nombre de la sucursal" required style="width:240px">
+  <div><label class="small">Apertura</label><input type="date" name="effective_from"></div>
+  <div><label class="small">Cierre</label><input type="date" name="effective_to"></div>
+  <button class="ghost">Agregar sucursal</button>
+</form>
+<p class="small">Una sucursal que abre a mitad de ejercicio puede tener gastos y nómina antes
+de tener ventas: el sistema respeta la fecha de cada concepto.</p>
+{% endif %}
+</div>
+
+<h3>2. Unidades de negocio</h3>
+<div class="panel">
+<table><thead><tr><th>Unidad</th><th>Sucursales</th><th>Comisión</th><th>Vigencia</th><th></th></tr></thead>
+<tbody>
 {% for u in cfg.business_units %}
 <tr>
   <td><b>{{ u.name }}</b> <span class="small">{{ u.id }}</span></td>
-  <td class="small">{{ 'por unidades' if u.sales_mode.value=='UNIT_BASED' else 'por monto' }} ·
-      {{ u.sales_currency }}{% if u.commission_rate %} · comisión {{ (u.commission_rate*100)|round(1) }}%{% endif %}</td>
+  <td class="small">{{ cfg.unit_branches(u.id)|map(attribute='name')|join(', ') or '—' }}</td>
+  <td class="small">{{ (u.commission_rate*100)|round(1) ~ '%' if u.commission_rate else '—' }}</td>
   <td class="small">{{ u.effective_from or 'todo el ejercicio' }}{% if u.effective_to %} → {{ u.effective_to }}{% endif %}</td>
-  <td>{{ u.branches|length }}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='business_unit', entity_id=u.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
 </tr>
-{% for b in u.branches %}
-<tr><td style="padding-left:26px">↳ {{ b.name }} <span class="small">{{ b.id }}</span></td>
-  <td class="small">sucursal</td>
-  <td class="small">{{ b.effective_from or 'todo el ejercicio' }}{% if b.effective_to %} → {{ b.effective_to }}{% endif %}</td>
-  <td></td>
-  <td>{% if editable %}<form method="post"
-      action="{{ url_for('configurar_borrar', step='estructura', kind='branch', entity_id=b.id) }}">
-      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
-{% endfor %}
 {% else %}
 <tr><td colspan="5" class="small">Todavía no hay unidades de negocio.</td></tr>
 {% endfor %}
 </tbody></table>
-</div>
 
 {% if editable %}
-<div class="panel">
-  <h3>Agregar unidad de negocio</h3>
-  <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='unidad') }}">
-    <div class="row">
-      <div style="flex:2"><label class="small">Nombre</label><input type="text" name="name" required></div>
-      <div style="flex:1"><label class="small">Modalidad de venta</label>
-        <select name="sales_mode">
-          <option value="UNIT_BASED">Por unidades (el gerente carga cantidad)</option>
-          <option value="AMOUNT_BASED">Por monto (el gerente carga importe)</option>
-        </select></div>
-      <div style="flex:1"><label class="small">Fórmula de margen</label>
-        <select name="margin_formula">
-          <option value="PERCENTAGE_OF_SALES">% sobre ventas</option>
-          <option value="MARKUP_ON_COST">Markup sobre costo</option>
-        </select></div>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <div style="flex:1"><label class="small">Moneda de venta</label>
-        <select name="sales_currency">
-        {% for c in cfg.enabled_currencies %}<option>{{ c }}</option>{% endfor %}</select></div>
-      <div style="flex:1"><label class="small">Comisión % (opcional)</label>
-        <input type="number" step="any" name="commission_rate" placeholder="ej: 2"></div>
-      <div style="flex:1"><label class="small">Inicio (opcional)</label>
-        <input type="date" name="effective_from"></div>
-      <div style="flex:1"><label class="small">Cierre (opcional)</label>
-        <input type="date" name="effective_to"></div>
-    </div>
-    <p class="small" style="margin-top:8px">La modalidad y la fórmula de margen las define el COO
-    y quedan fijas para toda la unidad: el que carga no elige entre porcentaje e importe.</p>
-    <button style="margin-top:6px">Agregar unidad</button>
-  </form>
+<form method="post" action="{{ url_for('configurar_accion', step='estructura', action='unidad') }}"
+      style="margin-top:14px">
+  <div class="row">
+    <div style="flex:2"><label class="small">Nombre</label><input type="text" name="name" required></div>
+    <div style="flex:1"><label class="small">Comisión sobre ventas % (opcional)</label>
+      <input type="number" step="any" name="commission_rate" placeholder="ej: 2"></div>
+    <div style="flex:1"><label class="small">Inicio (opcional)</label>
+      <input type="date" name="effective_from"></div>
+    <div style="flex:1"><label class="small">Cierre (opcional)</label>
+      <input type="date" name="effective_to"></div>
+  </div>
+  <p class="small" style="margin-top:8px">La modalidad de venta y la fórmula de margen no se
+  definen acá: son de cada producto, porque una misma unidad puede vender mercadería por
+  unidades y servicios por monto.</p>
+  <button style="margin-top:6px">Agregar unidad</button>
+</form>
+{% endif %}
 </div>
 
-{% if cfg.business_units %}
+<h3>3. Asignar sucursales a unidades</h3>
 <div class="panel">
-  <h3>Agregar sucursal</h3>
-  <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='sucursal') }}" class="row">
-    <select name="business_unit_id" style="width:auto">
-      {% for u in cfg.business_units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
-    </select>
-    <input type="text" name="name" placeholder="Nombre de la sucursal" required style="width:220px">
-    <div><label class="small">Apertura</label><input type="date" name="effective_from"></div>
-    <div><label class="small">Cierre</label><input type="date" name="effective_to"></div>
-    <button class="ghost">Agregar</button>
+{% if editable %}
+  {% if cfg.branches and cfg.business_units %}
+  <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='asignar') }}"
+        class="row">
+    <div style="flex:1"><label class="small">Sucursal</label>
+      <select name="branch_id" required>
+        {% for b in cfg.branches %}
+        <option value="{{ b.id }}">{{ b.name }}{% if b.assigned %} — hoy en {{ cfg.unit(b.business_unit_id).name }}{% endif %}</option>
+        {% endfor %}
+      </select></div>
+    <div style="flex:1"><label class="small">Unidad de negocio</label>
+      <select name="business_unit_id">
+        <option value="">— quitar asignación —</option>
+        {% for u in cfg.business_units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+      </select></div>
+    <div style="align-self:end"><button class="ghost">Asignar</button></div>
   </form>
-  <p class="small">Una sucursal que abre a mitad de ejercicio puede tener gastos y nómina antes
-  de tener ventas. El sistema respeta las fechas de cada concepto.</p>
+  {% else %}
+  <p class="small">Necesitás al menos una sucursal y una unidad de negocio para poder asociarlas.</p>
+  {% endif %}
+{% endif %}
+{% if cfg.unassigned_branches() %}
+<p class="small" style="color:var(--warn);margin-top:10px">
+  Sin asignar: {{ cfg.unassigned_branches()|map(attribute='name')|join(', ') }}.
+  Una sucursal sin unidad no genera cargas y no deja cerrar la configuración.</p>
+{% endif %}
 </div>
-{% endif %}
-{% endif %}
 
-<h3>Unidades de soporte y centros de costo</h3>
+<h3>4. Unidades de soporte y centros de costo</h3>
 <div class="panel">
 <table><thead><tr><th>Unidad de soporte</th><th>Centros de costo</th><th></th></tr></thead><tbody>
 {% for s in cfg.support_units %}

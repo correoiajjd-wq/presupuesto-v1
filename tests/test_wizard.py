@@ -38,6 +38,25 @@ class WizardCase(unittest.TestCase):
         self.assertEqual(r.status_code, expect)
         return r
 
+    def unidad(self, name="Retail", **extra):
+        self.paso("estructura", "unidad", {"name": name, **extra})
+
+    def sucursal(self, v, name, unit_id, **extra):
+        """Alta en el catálogo de la empresa y después asignación, con selector."""
+        self.paso("estructura", "sucursal", {"name": name, **extra})
+        branch = next(b for b in v.configuration.branches if b.name == name)
+        self.paso("estructura", "asignar",
+                  {"branch_id": branch.id, "business_unit_id": unit_id})
+        return branch
+
+    def producto(self, unit_id, code, name, family_id, expect=200, **extra):
+        data = {"business_unit_id": unit_id, "code": code, "name": name,
+                "family_id": family_id, "sales_mode": "UNIT_BASED",
+                "margin_formula": "PERCENTAGE_OF_SALES", "price": "10",
+                "currency": "USD", "margin": "25", "sales_frequency": "MONTHLY"}
+        data.update(extra)
+        return self.paso("productos", "producto", data, expect)
+
     # ------------------------------------------------------------------
     def test_armar_una_empresa_completa_y_cerrar(self):
         v = self.crear()
@@ -52,39 +71,31 @@ class WizardCase(unittest.TestCase):
         self.assertGreater(rate_ini, rate_fin)   # el peso se deprecia -> vale menos USD
 
         # ---- estructura
-        self.paso("estructura", "unidad", {
-            "name": "Retail", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Retail")
         unit = v.configuration.business_units[0]
-        self.paso("estructura", "sucursal", {"business_unit_id": unit.id, "name": "Casa central"})
-        self.paso("estructura", "sucursal", {"business_unit_id": unit.id, "name": "Sucursal Este",
-                                             "effective_from": "2028-07-01"})
+        self.sucursal(v, "Casa central", unit.id)
+        self.sucursal(v, "Sucursal Este", unit.id, effective_from="2028-07-01")
         self.paso("estructura", "soporte", {"name": "Administración"})
         su = v.configuration.support_units[0]
         self.paso("estructura", "centro", {"support_unit_id": su.id, "name": "Contabilidad"})
-        self.assertEqual(len(unit.branches), 2)
-        self.assertEqual(unit.branches[1].effective_from.month, 7)
+        sucursales = v.configuration.unit_branches(unit.id)
+        self.assertEqual(len(sucursales), 2)
+        self.assertEqual(sucursales[1].effective_from.month, 7)
 
         # ---- catálogo (lo define el COO)
         self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "Bebidas"})
         fam = unit.families[0]
-        self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "B001", "name": "Gaseosa",
-            "family_id": fam.id, "price": "10", "price_currency": "USD",
-            "margin": "35", "sales_frequency": "MONTHLY"})
-        self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "XX", "name": "Otros",
-            "family_id": fam.id, "price": "5", "price_currency": "USD",
-            "margin": "20", "sales_frequency": "MONTHLY", "is_other": "1"})
+        self.producto(unit.id, "B001", "Gaseosa", fam.id, margin="35")
+        self.producto(unit.id, "XX", "Otros", fam.id, margin="20", is_other="1")
         self.assertEqual(len(unit.products), 2)
         self.assertEqual(unit.products[0].margin, __import__("decimal").Decimal("0.35"))
 
         # ---- gastos
         self.paso("gastos", "gasto", {
-            "name": "Alquiler", "level": "BRANCH", "target_id": unit.branches[0].id,
+            "name": "Alquiler", "target": [f"BRANCH:{sucursales[0].id}"],
             "currency": "USD", "frequency": "MONTHLY", "responsible_role": "ADMIN_AREA"})
         self.paso("gastos", "gasto", {
-            "name": "Licencias", "level": "COMPANY", "currency": "USD",
+            "name": "Licencias", "target": ["COMPANY:"], "currency": "USD",
             "frequency": "ANNUAL", "responsible_role": "ADMIN_AREA"})
         self.assertEqual(len(v.configuration.expenses), 2)
 
@@ -140,76 +151,65 @@ class WizardCase(unittest.TestCase):
     def test_no_se_puede_cerrar_sin_tipo_de_cambio(self):
         """Doc 02 §30: el TC se carga para cada día del ejercicio."""
         v = self.crear()
-        self.paso("estructura", "unidad", {
-            "name": "Retail", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Retail")
         unit = v.configuration.business_units[0]
-        self.paso("estructura", "sucursal", {"business_unit_id": unit.id, "name": "Central"})
+        self.sucursal(v, "Central", unit.id)
         self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "General"})
-        self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "XX", "name": "Otros",
-            "family_id": unit.families[0].id, "price": "10", "price_currency": "USD",
-            "margin": "20", "sales_frequency": "MONTHLY", "is_other": "1"})
+        self.producto(unit.id, "XX", "Otros", unit.families[0].id, is_other="1")
         r = self.client.post("/configurar/cerrar", follow_redirects=True)
         self.assertIn(b"MISSING_FX_RATE", r.data)
         self.assertEqual(v.configuration.status, ConfigStatus.DRAFT)
 
     def test_producto_sin_familia_se_rechaza(self):
         v = self.crear()
-        self.paso("estructura", "unidad", {
-            "name": "Retail", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Retail")
         unit = v.configuration.business_units[0]
-        r = self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "A", "name": "A", "family_id": "",
-            "price": "1", "price_currency": "USD", "margin": "10",
-            "sales_frequency": "MONTHLY"})
+        r = self.producto(unit.id, "A", "A", "")
         self.assertIn(b"INVALID_FAMILY", r.data)
         self.assertEqual(unit.products, [])
 
-    def test_un_solo_producto_otros_por_unidad(self):
-        """Doc 02 §8: XX — Otros es obligatorio, y es uno solo."""
+    def test_otros_es_por_familia_no_por_unidad(self):
+        """El 'Otros' se controla por familia: cada una necesita el suyo."""
         v = self.crear()
-        self.paso("estructura", "unidad", {
-            "name": "Retail", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Retail")
         unit = v.configuration.business_units[0]
-        self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "General"})
-        base = {"business_unit_id": unit.id, "family_id": unit.families[0].id,
-                "price": "10", "price_currency": "USD", "margin": "20",
-                "sales_frequency": "MONTHLY", "is_other": "1"}
-        self.paso("productos", "producto", {**base, "code": "XX", "name": "Otros"})
-        r = self.paso("productos", "producto", {**base, "code": "YY", "name": "Otros 2"})
+        self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "Bebidas"})
+        self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "Comidas"})
+        bebidas, comidas = unit.families
+        self.producto(unit.id, "XX1", "Otros bebidas", bebidas.id, is_other="1")
+        # la segunda familia tiene que poder tener su propio "Otros"
+        self.producto(unit.id, "XX2", "Otros comidas", comidas.id, is_other="1")
+        self.assertEqual(len(unit.products), 2)
+        self.assertEqual(unit.missing_other_products(), [])
+        # pero dos en la misma familia, no
+        r = self.producto(unit.id, "XX3", "Otro más", bebidas.id, is_other="1")
         self.assertIn(b"ya tiene su producto", r.data)
-        self.assertEqual(len(unit.products), 1)
+        self.assertEqual(len(unit.products), 2)
 
     def test_distribucion_de_gasto_debe_sumar_cien(self):
         v = self.crear()
         for name in ("A", "B"):
-            self.paso("estructura", "unidad", {
-                "name": name, "sales_mode": "AMOUNT_BASED",
-                "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+            self.unidad(name)
         a, b = v.configuration.business_units
+        base = {"name": "Seguros", "currency": "USD", "frequency": "ANNUAL",
+                "allocation_mode": "PERCENTAGE",
+                "target": [f"BUSINESS_UNIT:{a.id}", f"BUSINESS_UNIT:{b.id}"]}
         r = self.paso("gastos", "gasto", {
-            "name": "Seguros", "level": "DISTRIBUTED", "currency": "USD", "frequency": "ANNUAL",
-            f"alloc_{a.id}": "60", f"alloc_{b.id}": "30"})
+            **base, f"pct_BUSINESS_UNIT:{a.id}": "60", f"pct_BUSINESS_UNIT:{b.id}": "30"})
         self.assertIn(b"INVALID_ALLOCATION", r.data)
         self.assertEqual(v.configuration.expenses, [])
         self.paso("gastos", "gasto", {
-            "name": "Seguros", "level": "DISTRIBUTED", "currency": "USD", "frequency": "ANNUAL",
-            f"alloc_{a.id}": "60", f"alloc_{b.id}": "40"})
+            **base, f"pct_BUSINESS_UNIT:{a.id}": "60", f"pct_BUSINESS_UNIT:{b.id}": "40"})
         self.assertEqual(len(v.configuration.expenses), 1)
 
     def test_el_coo_no_puede_tocar_los_gastos(self):
         """Doc 01 §6: cada elemento de la configuración tiene su responsable."""
         v = self.crear()
-        self.paso("estructura", "unidad", {
-            "name": "Retail", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Retail")
         coo = self.client
         coo.post("/login", data={"user_id": "u.coo"})
         r = coo.post("/configurar/gastos/gasto", data={
-            "name": "X", "level": "COMPANY", "currency": "USD", "frequency": "MONTHLY"},
+            "name": "X", "target": ["COMPANY:"], "currency": "USD", "frequency": "MONTHLY"},
             follow_redirects=True)
         self.assertIn(b"UNAUTHORIZED", r.data)
         self.assertEqual(v.configuration.expenses, [])
@@ -225,10 +225,8 @@ class WizardCase(unittest.TestCase):
         service, budget, version = bootstrap()      # ya viene con la configuración cerrada
         client = create_web_app(service, budget.id).test_client()
         client.post("/login", data=CFO)
-        r = client.post("/configurar/estructura/unidad", data={
-            "name": "Nueva", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"},
-            follow_redirects=True)
+        r = client.post("/configurar/estructura/unidad", data={"name": "Nueva"},
+                        follow_redirects=True)
         self.assertIn(b"CONFIGURATION_LOCKED", r.data)
         self.assertEqual(len(version.configuration.business_units), 2)
 
@@ -250,31 +248,23 @@ class WizardCase(unittest.TestCase):
         from app.domain.graph import nk
 
         v = self.crear(currencies="USD")
-        self.paso("estructura", "unidad", {
-            "name": "Mayorista", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"})
+        self.unidad("Mayorista")
         unit = v.configuration.business_units[0]
-        self.paso("estructura", "sucursal", {"business_unit_id": unit.id, "name": "Central"})
-        self.paso("estructura", "sucursal", {"business_unit_id": unit.id, "name": "Norte"})
+        central = self.sucursal(v, "Central", unit.id)
+        norte = self.sucursal(v, "Norte", unit.id)
         self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "Alimentos"})
         fam = unit.families[0].id
-        self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "A001", "name": "Harina", "family_id": fam,
-            "price": "20", "price_currency": "USD", "margin": "25",
-            "sales_frequency": "MONTHLY"})
-        self.paso("productos", "producto", {
-            "business_unit_id": unit.id, "code": "XX", "name": "Otros", "family_id": fam,
-            "price": "10", "price_currency": "USD", "margin": "18",
-            "sales_frequency": "MONTHLY", "is_other": "1"})
+        self.producto(unit.id, "A001", "Harina", fam, price="20", margin="25")
+        self.producto(unit.id, "XX", "Otros", fam, price="10", margin="18", is_other="1")
+        # el alquiler existe en las dos sucursales: en Norte se cargará 0
         self.paso("gastos", "gasto", {
-            "name": "Alquiler", "level": "BRANCH", "target_id": unit.branches[0].id,
+            "name": "Alquiler", "target": [f"BRANCH:{central.id}", f"BRANCH:{norte.id}"],
             "currency": "USD", "frequency": "MONTHLY", "responsible_role": "ADMIN_AREA"})
         self.paso("nomina", "area", {"name": "Ventas", "base_salary": "2200", "currency": "USD"})
         self.paso("nomina", "concepto", {"concept": "Cargas", "percentage": "18"})
         self.paso("ratios", "ratios", {"ratio": ["GROSS_MARGIN_PCT", "EBITDA_MARGIN_PCT"]})
         self.paso("workflow", "workflow_default", {})
 
-        central, norte = unit.branches
         self.paso("workflow", "usuario", {
             "name": "Marcos Gerente", "role": ["UNIT_MANAGER", "PAYROLL_AREA"],
             "scope": [f"BR:{central.id}"]})
@@ -296,19 +286,19 @@ class WizardCase(unittest.TestCase):
 
         t_ventas = next(t for t in propias if t.concept == "SALES")
         gerente.post(f"/tareas/{t_ventas.id}",
-                     data={f"S:{unit.products[0].id}:{v.configuration.periods[0].code}": "1000",
-                           f"S:{unit.products[1].id}:{v.configuration.periods[0].code}": "200"},
+                     data={f"S~{unit.products[0].id}~{v.configuration.periods[0].code}": "1000",
+                           f"S~{unit.products[1].id}~{v.configuration.periods[0].code}": "200"},
                      follow_redirects=True)
         t_dot = next(t for t in propias if t.concept == "PAYROLL_HEADCOUNT")
         gerente.post(f"/tareas/{t_dot.id}",
-                     data={f"H:{v.configuration.payroll.areas[0].id}": "4"},
+                     data={f"H~{v.configuration.payroll.areas[0].id}": "4"},
                      follow_redirects=True)
 
         # y no puede tocar la sucursal Norte
         t_norte = next(t for t in v.tasks.values()
                        if t.scope_key == f"BR:{norte.id}" and t.concept == "SALES")
         r = gerente.post(f"/tareas/{t_norte.id}",
-                         data={f"S:{unit.products[0].id}:{v.configuration.periods[0].code}": "500"},
+                         data={f"S~{unit.products[0].id}~{v.configuration.periods[0].code}": "500"},
                          follow_redirects=True)
         self.assertIn(b"UNAUTHORIZED_SCOPE", r.data)
 
@@ -316,13 +306,14 @@ class WizardCase(unittest.TestCase):
         admin.post("/login", data={"user_id": "u.elena"})
         admin.post("/versiones/seleccionar", data={"version_id": v.id})
         t_gastos = next(t for t in v.tasks.values() if t.concept == "EXPENSES")
+        exp = v.configuration.expenses[0].id
+        p0 = v.configuration.periods[0].code
         admin.post(f"/tareas/{t_gastos.id}",
-                   data={f"E:{v.configuration.expenses[0].id}:"
-                         f"{v.configuration.periods[0].code}": "3000"},
+                   data={f"E~{exp}~BR:{central.id}~{p0}": "3000",
+                         f"E~{exp}~BR:{norte.id}~{p0}": "0"},
                    follow_redirects=True)
 
         # el motor ya calcula sobre el modelo que se armó a mano
-        p0 = v.configuration.periods[0].code
         vals = v.calculate()
         self.assertEqual(vals[nk("SALES", "CO", p0)], D(22000))          # 1000x20 + 200x10
         self.assertEqual(vals[nk("COGS", "CO", p0)], D(16640))           # 20000x0.75 + 2000x0.82
@@ -334,10 +325,8 @@ class WizardCase(unittest.TestCase):
     def test_un_gerente_no_ve_el_wizard(self):
         gerente = create_web_app(self.service, self.budget.id).test_client()
         gerente.post("/login", data={"user_id": "u.br01"})
-        r = gerente.post("/configurar/estructura/unidad", data={
-            "name": "X", "sales_mode": "UNIT_BASED",
-            "margin_formula": "PERCENTAGE_OF_SALES", "sales_currency": "USD"},
-            follow_redirects=True)
+        r = gerente.post("/configurar/estructura/unidad", data={"name": "X"},
+                         follow_redirects=True)
         self.assertIn(b"UNAUTHORIZED", r.data)
 
 

@@ -391,7 +391,7 @@ class BudgetService:
             version.tasks[task.id] = task
 
         for u in cfg.business_units:
-            for b in u.branches:
+            for b in cfg.unit_branches(u.id):
                 add("SALES", f"BR:{b.id}", f"Ventas — {u.name} / {b.name}")
                 add("PAYROLL_HEADCOUNT", f"BR:{b.id}", f"Dotación — {u.name} / {b.name}")
         if cfg.expenses:

@@ -91,8 +91,7 @@ def write_report(path, cfg, values, service, version, budget) -> None:
       "<thead><tr><th>Sucursal</th><th>Ventas</th><th>Margen bruto</th><th>Gastos</th>"
       "<th>Nómina</th><th>EBITDA</th><th>Corporativos</th><th>Resultado final</th>"
       "<th>Dotación</th></tr></thead><tbody>")
-    for u in cfg.business_units:
-        for b in u.branches:
+    for u, b in cfg.all_branches():
             s = scope_br(b.id)
             a("<tr>"
               f"<td>{escape(u.name)} / {escape(b.name)}</td>"

@@ -8,16 +8,17 @@ modifica; los cambios estructurales requieren una nueva versión.</p>
 <div class="grid2">
 <div><h2>Estructura</h2><div class="panel">
 {% for u in cfg.business_units %}
-  <h3>{{ u.name }} — {{ 'venta por unidades' if u.sales_mode.value=='UNIT_BASED' else 'venta por monto' }}</h3>
+  <h3>{{ u.name }}</h3>
   <table><tbody>
-  {% for b in u.branches %}
+  {% for b in cfg.unit_branches(u.id) %}
   <tr><td>Sucursal {{ b.name }}</td><td class="small">
     {{ 'desde ' ~ b.effective_from if b.effective_from else 'todo el ejercicio' }}</td></tr>
   {% endfor %}
   {% for p in u.products %}
   <tr><td>{{ p.code }} — {{ p.name }}</td><td class="small">
-    {% if u.sales_mode.value=='UNIT_BASED' %}{{ p.price }} {{ p.price_currency }} · {% endif %}
-    margen {{ (p.margin*100)|round }}% · {{ p.sales_frequency.value|lower }}</td></tr>
+    {% if p.sales_mode.value=='UNIT_BASED' %}{{ p.price }} {{ p.currency }} · {% else %}monto en {{ p.currency }} · {% endif %}
+    {% if p.margin_formula.value=='NO_COST' %}sin costo{% else %}margen {{ (p.margin*100)|round }}%{% endif %}
+    · {{ p.sales_frequency.value|lower }}</td></tr>
   {% endfor %}
   </tbody></table>
 {% endfor %}
@@ -39,9 +40,8 @@ modifica; los cambios estructurales requieren una nueva versión.</p>
 <h2>Gastos</h2><div class="panel"><table>
 <thead><tr><th>Gasto</th><th>Imputación</th><th>Frecuencia</th></tr></thead><tbody>
 {% for e in cfg.expenses %}
-<tr><td>{{ e.name }}</td><td class="small">{{ e.level.value }}{% if e.target_id %} {{ e.target_id }}{% endif %}
-{% if e.distribute_to_branches %} · se distribuye a sucursales{% endif %}
-{% if e.allocations %} ({% for a in e.allocations %}{{ a.target_id }} {{ (a.percentage*100)|round }}%{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}</td>
+<tr><td>{{ e.name }}</td><td class="small">
+{% for t in e.targets %}{{ cfg.scope_label(t.scope_key) }}{% if t.percentage %} ({{ (t.percentage*100)|round }}%){% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</td>
 <td class="small">{{ e.frequency.value|lower }} · {{ e.currency }}</td></tr>
 {% endfor %}
 </tbody></table></div>

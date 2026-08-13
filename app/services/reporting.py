@@ -35,7 +35,7 @@ def scopes_of(cfg: Configuration) -> list[tuple[str, str, str]]:
     out = [(scope_co(), cfg.company_name, "COMPANY")]
     for u in cfg.business_units:
         out.append((scope_bu(u.id), u.name, "BUSINESS_UNIT"))
-        for b in u.branches:
+        for b in cfg.unit_branches(u.id):
             out.append((scope_br(b.id), f"{u.name} / {b.name}", "BRANCH"))
     for su in cfg.support_units:
         out.append((scope_su(su.id), su.name, "SUPPORT_UNIT"))

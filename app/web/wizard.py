@@ -20,9 +20,9 @@ from decimal import Decimal
 from typing import Optional
 
 from ..domain.config import (
-    Allocation, BalanceItem, BalanceSection, BalanceSource, Branch, BusinessUnit,
-    CapexCategory, ConfigStatus, Configuration, CostCenter, ExpenseDefinition, ExpenseLevel,
-    InventoryLevel, MarginFormula, Objective, ObjectiveType, PayrollArea,
+    AllocationMode, BalanceItem, BalanceSection, BalanceSource, Branch, BusinessUnit,
+    CapexCategory, ConfigStatus, Configuration, CostCenter, ExpenseDefinition, ExpenseTarget,
+    ExpenseTargetType, InventoryLevel, MarginFormula, Objective, ObjectiveType, PayrollArea,
     PayrollPercentageConcept, Product, ProductFamily, RatioSelection, Role,
     SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowStep,
 )
@@ -43,14 +43,16 @@ STEPS: list[Step] = [
     Step("general", "Datos generales", Role.CFO,
          "Empresa, ejercicio, monedas habilitadas y tipos de cambio estimados."),
     Step("estructura", "Estructura", Role.CFO,
-         "Unidades de negocio, sucursales, unidades de soporte y centros de costo. "
-         "Cada una puede tener fecha de inicio y de cierre dentro del ejercicio."),
+         "Primero se dan de alta las sucursales, para que cada nombre exista una sola vez. "
+         "Después se asigna cada una a su unidad de negocio eligiéndolas de un selector. "
+         "Todo puede tener fecha de inicio y de cierre dentro del ejercicio."),
     Step("productos", "Productos y familias", Role.COO,
-         "El COO define el catálogo de cada unidad y la modalidad de venta. "
-         "Todas las sucursales de la unidad usan el mismo catálogo."),
+         "El COO define el catálogo de cada unidad. La modalidad de venta y la fórmula de "
+         "margen son de cada producto: una unidad puede vender mercadería por unidades y "
+         "servicios por monto."),
     Step("gastos", "Gastos", Role.CFO,
-         "Qué gastos existen, dónde se imputan, con qué frecuencia y en qué moneda. "
-         "El que carga no decide el nivel."),
+         "Qué gastos existen, a qué destinos se imputan, con qué frecuencia y en qué moneda. "
+         "Un mismo gasto puede ir a varias sucursales y centros de costo a la vez."),
     Step("nomina", "Nómina", Role.CFO,
          "Áreas con su sueldo base, reglas de aumento y conceptos porcentuales. "
          "Las unidades informan personas; Nómina pone los valores."),
@@ -195,9 +197,6 @@ def add_business_unit(version, form) -> BusinessUnit:
     unit = BusinessUnit(
         id=_next_id([u.id for u in cfg.business_units], "BU"),
         name=form["name"].strip(),
-        sales_mode=SalesMode(form["sales_mode"]),
-        margin_formula=MarginFormula(form["margin_formula"]),
-        sales_currency=form["sales_currency"].strip().upper(),
         commission_rate=(_pct(form["commission_rate"])
                          if form.get("commission_rate", "").strip() else None),
         effective_from=_opt_date(form.get("effective_from")),
@@ -209,16 +208,35 @@ def add_business_unit(version, form) -> BusinessUnit:
 
 
 def add_branch(version, form) -> Branch:
+    """Alta de la sucursal en el catálogo de la empresa, todavía sin unidad."""
     assert_open(version)
     cfg = version.configuration
-    unit = cfg.unit(form["business_unit_id"])
+    name = form["name"].strip()
+    if any(b.name.strip().lower() == name.lower() for b in cfg.branches):
+        raise BudgetError("DUPLICATE_BRANCH_NAME", f"ya existe una sucursal llamada {name}")
     branch = Branch(
-        id=_next_id([b.id for _, b in cfg.all_branches()], "BR"),
-        name=form["name"].strip(),
+        id=_next_id([b.id for b in cfg.branches], "BR"),
+        name=name,
         effective_from=_opt_date(form.get("effective_from")),
         effective_to=_opt_date(form.get("effective_to")),
     )
-    unit.branches.append(branch)
+    cfg.branches.append(branch)
+    version.invalidate()
+    return branch
+
+
+def assign_branch(version, form) -> Branch:
+    """Asocia una sucursal existente a una unidad de negocio. Ambos por selector,
+    para que los nombres no se dupliquen ni se confundan."""
+    assert_open(version)
+    cfg = version.configuration
+    branch = cfg.branch(form["branch_id"])
+    unit_id = (form.get("business_unit_id") or "").strip()
+    if not unit_id:
+        branch.business_unit_id = None
+    else:
+        cfg.unit(unit_id)
+        branch.business_unit_id = unit_id
     version.invalidate()
     return branch
 
@@ -269,20 +287,26 @@ def add_product(version, form) -> Product:
                           "Definí al menos una familia antes de cargar productos: "
                           "cada producto pertenece a una única familia.")
     is_other = bool(form.get("is_other"))
+    family_id = form["family_id"]
+    margin_formula = MarginFormula(form.get("margin_formula", "PERCENTAGE_OF_SALES"))
     product = Product(
         id=_next_id([p.id for u in cfg.business_units for p in u.products], "P", 3),
         code=form["code"].strip().upper(),
         name=form["name"].strip(),
-        family_id=form["family_id"],
+        family_id=family_id,
+        sales_mode=SalesMode(form.get("sales_mode", "UNIT_BASED")),
+        margin_formula=margin_formula,
         price=_dec(form.get("price"), "0"),
-        price_currency=form.get("price_currency", unit.sales_currency).strip().upper(),
-        margin=_pct(form["margin"]),
+        currency=form["currency"].strip().upper(),
+        margin=Decimal(1) if margin_formula is MarginFormula.NO_COST else _pct(form["margin"]),
         sales_frequency=Frequency(form["sales_frequency"]),
         is_other=is_other,
     )
-    if is_other and any(p.is_other for p in unit.products):
-        raise BudgetError("INVALID_PRODUCT",
-                          "La unidad ya tiene su producto 'Otros'. Sólo puede haber uno.")
+    # El "Otros" es por familia: cada familia necesita el suyo, y sólo uno.
+    if is_other and any(p.is_other and p.family_id == family_id for p in unit.products):
+        raise BudgetError(
+            "DUPLICATE_OTHER_PRODUCT",
+            f"la familia {unit.family(family_id).name} ya tiene su producto 'Otros'")
     unit.products.append(product)
     version.invalidate()
     return product
@@ -291,38 +315,52 @@ def add_product(version, form) -> Product:
 # ==========================================================================
 # 4. Gastos
 # ==========================================================================
+def expense_target_options(cfg: Configuration) -> list[tuple[str, str, str]]:
+    """(clave de destino, etiqueta, grupo) para el formulario de gastos."""
+    out = [("COMPANY:", "Empresa (corporativo)", "Empresa")]
+    out += [(f"BUSINESS_UNIT:{u.id}", u.name, "Unidades de negocio") for u in cfg.business_units]
+    out += [(f"BRANCH:{b.id}", f"{u.name} / {b.name}", "Sucursales") for u, b in cfg.all_branches()]
+    out += [(f"COST_CENTER:{c.id}", f"{s.name} / {c.name}", "Centros de costo")
+            for s in cfg.support_units for c in s.cost_centers]
+    return out
+
+
 def add_expense(version, form) -> ExpenseDefinition:
+    """Un gasto puede imputarse a varios destinos a la vez.
+
+    Internet va a todas las sucursales y a algunos centros de costo; alquiler
+    va sólo a las sucursales que no son propias. En modo PER_TARGET cada destino
+    recibe su propio importe y donde no corresponde se carga 0.
+    """
     assert_open(version)
     cfg = version.configuration
-    level = ExpenseLevel(form["level"])
-    allocations: list[Allocation] = []
-    target_id = None
+    mode = AllocationMode(form.get("allocation_mode", "PER_TARGET"))
+    selected = form.getlist("target")
+    if not selected:
+        raise BudgetError("INVALID_EXPENSE", "Elegí al menos un destino para el gasto.")
 
-    if level is ExpenseLevel.DISTRIBUTED:
-        for unit in cfg.business_units:
-            raw = form.get(f"alloc_{unit.id}", "").strip()
-            if raw:
-                allocations.append(Allocation(target_type="BUSINESS_UNIT", target_id=unit.id,
-                                              percentage=_pct(raw)))
-        if not allocations:
-            raise BudgetError("INVALID_ALLOCATION",
-                              "Indicá los porcentajes de distribución (deben sumar 100%).")
-    elif level is not ExpenseLevel.COMPANY:
-        target_id = form.get("target_id") or None
-        if not target_id:
-            raise BudgetError("INVALID_EXPENSE", "Elegí a qué ámbito se imputa el gasto.")
+    targets: list[ExpenseTarget] = []
+    for raw in selected:
+        ttype, _, tid = raw.partition(":")
+        pct = None
+        if mode is AllocationMode.PERCENTAGE:
+            pct = _pct(form.get(f"pct_{raw}", "0"))
+        targets.append(ExpenseTarget(
+            target_type=ExpenseTargetType(ttype),
+            target_id=tid or None,
+            percentage=pct,
+            distribute_to_branches=(ttype == "BUSINESS_UNIT"
+                                    and bool(form.get(f"split_{raw}"))),
+        ))
 
     ed = ExpenseDefinition(
         id=_next_id([e.id for e in cfg.expenses], "EXP"),
         name=form["name"].strip(),
-        level=level,
-        target_id=target_id,
-        allocations=allocations,
+        allocation_mode=mode,
+        targets=targets,
         currency=form["currency"].strip().upper(),
         frequency=Frequency(form["frequency"]),
         responsible_role=Role(form.get("responsible_role", Role.ADMIN_AREA.value)),
-        distribute_to_branches=bool(form.get("distribute_to_branches")),
-        corporate=level in (ExpenseLevel.COMPANY, ExpenseLevel.COST_CENTER),
     )
     cfg.expenses.append(ed)
     version.invalidate()
@@ -498,8 +536,7 @@ def default_workflow(version) -> None:
 def scope_options(cfg: Configuration) -> list[tuple[str, str]]:
     out = [("", "Toda la empresa")]
     out += [(f"BU:{u.id}", f"Unidad — {u.name}") for u in cfg.business_units]
-    out += [(f"BR:{b.id}", f"Sucursal — {u.name} / {b.name}")
-            for u in cfg.business_units for b in u.branches]
+    out += [(f"BR:{b.id}", f"Sucursal — {u.name} / {b.name}") for u, b in cfg.all_branches()]
     out += [(f"SU:{u.id}", f"Soporte — {u.name}") for u in cfg.support_units]
     return out
 
@@ -544,17 +581,25 @@ def remove(version, kind: str, entity_id: str, parent_id: Optional[str] = None) 
     cfg = version.configuration
     if kind == "business_unit":
         cfg.business_units = [u for u in cfg.business_units if u.id != entity_id]
-        cfg.expenses = [e for e in cfg.expenses if e.target_id != entity_id]
+        for b in cfg.branches:
+            if b.business_unit_id == entity_id:
+                b.business_unit_id = None
+        for e in cfg.expenses:
+            e.targets = [t for t in e.targets if t.target_id != entity_id]
+        cfg.expenses = [e for e in cfg.expenses if e.targets]
     elif kind == "branch":
-        for u in cfg.business_units:
-            u.branches = [b for b in u.branches if b.id != entity_id]
-        cfg.expenses = [e for e in cfg.expenses if e.target_id != entity_id]
+        cfg.branches = [b for b in cfg.branches if b.id != entity_id]
+        for e in cfg.expenses:
+            e.targets = [t for t in e.targets if t.target_id != entity_id]
+        cfg.expenses = [e for e in cfg.expenses if e.targets]
     elif kind == "support_unit":
         cfg.support_units = [u for u in cfg.support_units if u.id != entity_id]
     elif kind == "cost_center":
         for u in cfg.support_units:
             u.cost_centers = [c for c in u.cost_centers if c.id != entity_id]
-        cfg.expenses = [e for e in cfg.expenses if e.target_id != entity_id]
+        for e in cfg.expenses:
+            e.targets = [t for t in e.targets if t.target_id != entity_id]
+        cfg.expenses = [e for e in cfg.expenses if e.targets]
     elif kind == "product":
         for u in cfg.business_units:
             u.products = [p for p in u.products if p.id != entity_id]
@@ -590,7 +635,7 @@ def step_state(version) -> dict[str, dict]:
     fx_ok = all(r["loaded"] for r in fx_summary(version))
     branches = cfg.all_branches()
     products_ok = bool(cfg.business_units) and all(
-        u.products and u.families and any(p.is_other for p in u.products)
+        u.products and u.families and not u.missing_other_products()
         for u in cfg.business_units)
     modules_ok = (not cfg.inventory.enabled or any(u.families for u in cfg.business_units)) and \
                  (not cfg.balance.enabled or bool(cfg.balance.items))
@@ -600,9 +645,13 @@ def step_state(version) -> dict[str, dict]:
                                f"{cfg.fiscal_year_end:%d/%m/%Y} · "
                                f"{', '.join(cfg.enabled_currencies)}"
                                + ("" if fx_ok else " · faltan tipos de cambio"))},
-        "estructura": {"ready": bool(cfg.business_units) and bool(branches),
+        "estructura": {"ready": bool(cfg.business_units) and bool(branches)
+                                and not cfg.unassigned_branches(),
                        "detail": f"{len(cfg.business_units)} unidades · {len(branches)} "
-                                 f"sucursales · {len(cfg.support_units)} de soporte"},
+                                 f"sucursales asignadas"
+                                 + (f" · {len(cfg.unassigned_branches())} sin asignar"
+                                    if cfg.unassigned_branches() else "")
+                                 + f" · {len(cfg.support_units)} de soporte"},
         "productos": {"ready": products_ok,
                       "detail": f"{sum(len(u.products) for u in cfg.business_units)} productos · "
                                 f"{sum(len(u.families) for u in cfg.business_units)} familias"},

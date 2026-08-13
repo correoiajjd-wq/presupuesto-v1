@@ -17,8 +17,9 @@ from decimal import Decimal
 from typing import Optional
 
 from .config import (
+    AllocationMode,
     Configuration,
-    ExpenseLevel,
+    ExpenseTargetType,
     InventoryLevel,
     MarginFormula,
     SalesMode,
@@ -117,9 +118,9 @@ class BudgetEngine:
         amt: dict[tuple[str, str], dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
 
         for iv in self.inputs.of(Concept.SALES_QTY, Concept.SALES_AMOUNT):
-            unit = cfg.unit(iv.business_unit_id)
+            branch = cfg.branch(iv.branch_id)
+            unit = cfg.branch_owner(iv.branch_id)
             product = unit.product(iv.product_id)
-            branch = unit.branch(iv.branch_id)
             lp = Period.parse(iv.period)
             # La distribución sólo alcanza los meses en que la sucursal está vigente:
             # una sucursal que abre en junio no puede recibir 1/3 de un trimestre abr-jun.
@@ -136,11 +137,11 @@ class BudgetEngine:
                     qty[(iv.branch_id, iv.product_id)][p] += v
                 else:
                     amt[(iv.branch_id, iv.product_id)][p] += self._to_pres(
-                        v, iv.currency or unit.sales_currency, p
+                        v, iv.currency or product.currency, p
                     )
 
         for unit in cfg.business_units:
-            for branch in unit.branches:
+            for branch in cfg.unit_branches(unit.id):
                 for product in unit.products:
                     for p in self.periods:
                         s_key = nk("SALES", scope_prod(branch.id, product.id), p.code)
@@ -152,34 +153,33 @@ class BudgetEngine:
                             self.g.constant(c_key, ZERO, kind="CALCULATED", reason="fuera de vigencia")
                             continue
 
-                        if unit.sales_mode is SalesMode.UNIT_BASED:
+                        if product.sales_mode is SalesMode.UNIT_BASED:
                             q = qty[(branch.id, product.id)].get(p, ZERO)
-                            sales = q * product.price
-                            sales = self._to_pres(sales, product.price_currency, p)
+                            sales = self._to_pres(q * product.price, product.currency, p)
                             self.g.constant(
                                 s_key, sales, kind="INPUT",
                                 formula="cantidad x precio", quantity=str(q),
-                                price=str(product.price), currency=product.price_currency,
+                                price=str(product.price), currency=product.currency,
                             )
                         else:
                             sales = amt[(branch.id, product.id)].get(p, ZERO)
                             self.g.constant(
                                 s_key, sales, kind="INPUT", formula="monto cargado",
-                                currency=unit.sales_currency,
+                                currency=product.currency,
                             )
 
-                        margin = product.margin
-                        if unit.margin_formula is MarginFormula.PERCENTAGE_OF_SALES:
-                            fn = lambda v, k=s_key, m=margin: (
-                                None if v.get(k) is None else v[k] * (Decimal(1) - m)
-                            )
-                            formula = "ventas x (1 - margen)"
-                        else:  # MARKUP_ON_COST
-                            fn = lambda v, k=s_key, m=margin: (
-                                None if v.get(k) is None else v[k] / (Decimal(1) + m)
-                            )
-                            formula = "ventas / (1 + margen)"
-                        self.g.calc(c_key, [s_key], fn, formula=formula, margin=str(margin))
+                        # La modalidad y la fórmula de margen son del producto:
+                        # una unidad puede vender mercadería y servicios a la vez.
+                        ratio = product.cost_ratio
+                        formula = {
+                            MarginFormula.PERCENTAGE_OF_SALES: "ventas x (1 - margen)",
+                            MarginFormula.MARKUP_ON_COST: "ventas / (1 + margen)",
+                            MarginFormula.NO_COST: "sin costo: el precio es todo margen",
+                        }[product.margin_formula]
+                        self.g.calc(
+                            c_key, [s_key],
+                            lambda v, k=s_key, r=ratio: None if v.get(k) is None else v[k] * r,
+                            formula=formula, margin=str(product.margin))
 
                 # agregación producto -> sucursal
                 for p in self.periods:
@@ -251,7 +251,7 @@ class BudgetEngine:
         commission_rate: dict[str, Decimal] = {}
         for unit in cfg.business_units:
             if unit.commission_rate:
-                for b in unit.branches:
+                for b in cfg.unit_branches(unit.id):
                     commission_rate[scope_br(b.id)] = unit.commission_rate
 
         manual_commissions: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
@@ -323,12 +323,14 @@ class BudgetEngine:
     def _build_expenses(self) -> None:
         cfg = self.cfg
         # total cargado por definición de gasto y período (en moneda de presentación)
-        loaded: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        loaded: dict[tuple[str, str], dict[Period, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal))
         for iv in self.inputs.of(Concept.EXPENSE_AMOUNT):
             ed = cfg.expense(iv.expense_id)
             lp = Period.parse(iv.period)
             for p, v in self._expand(iv.value, lp, ed.frequency).items():
-                loaded[ed.id][p] += self._to_pres(v, iv.currency or ed.currency, p)
+                loaded[(ed.id, iv.scope_key)][p] += self._to_pres(
+                    v, iv.currency or ed.currency, p)
 
         # nodos por gasto
         branch_parts: dict[str, list[str]] = defaultdict(list)   # scope_br -> keys
@@ -336,65 +338,69 @@ class BudgetEngine:
         support_parts: dict[str, list[str]] = defaultdict(list)  # scope_su
         company_parts: list[str] = []
 
+        def route(target, part_key: str, p: Period) -> None:
+            """Lleva la porción de un gasto al ámbito que corresponde."""
+            tt = target.target_type
+            if tt is ExpenseTargetType.BRANCH:
+                branch_parts[scope_br(target.target_id)].append(part_key)
+            elif tt is ExpenseTargetType.COST_CENTER:
+                su = cfg.cost_center_owner(target.target_id)
+                support_parts[scope_su(su.id)].append(part_key)
+            elif tt is ExpenseTargetType.BUSINESS_UNIT:
+                tid = target.target_id
+                if not target.distribute_to_branches:
+                    unit_parts[scope_bu(tid)].append(part_key)
+                    return
+                sfy_bu = nk("SALES", scope_bu(tid), FY)
+                for b in cfg.unit_branches(tid):
+                    sub = nk("EXPENSE_PART", f"{part_key.split('|')[1]}>BR:{b.id}", p.code)
+                    sfy_br = nk("SALES", scope_br(b.id), FY)
+                    self.g.calc(sub, [part_key, sfy_br, sfy_bu],
+                                self._proportional(part_key, sfy_br, sfy_bu),
+                                formula="gasto de unidad distribuido a sucursal "
+                                        "proporcional a ventas anuales")
+                    branch_parts[scope_br(b.id)].append(sub)
+                # si la unidad no tiene ventas, el gasto queda corporativo de la unidad
+                residual = nk("EXPENSE_PART", f"{part_key.split('|')[1]}>CORP", p.code)
+                self.g.calc(residual, [part_key, sfy_bu],
+                            lambda v, k=part_key, s=sfy_bu: (
+                                (v.get(k) or ZERO) if not (v.get(s) or ZERO) else ZERO),
+                            formula="residual corporativo de la unidad (sin ventas)")
+                unit_parts[scope_bu(tid)].append(residual)
+            else:  # COMPANY
+                company_parts.append(part_key)
+
         for ed in cfg.expenses:
             for p in self.periods:
-                total_key = nk("EXPENSE_INPUT", f"EXP:{ed.id}", p.code)
-                self.g.constant(total_key, loaded[ed.id].get(p, ZERO), kind="INPUT",
-                                expense=ed.name, currency=ed.currency, frequency=ed.frequency.value)
-
-                # 1) reparto explícito por configuración
-                if ed.level is ExpenseLevel.DISTRIBUTED:
-                    targets = [(a.target_type, a.target_id, a.percentage) for a in ed.allocations]
+                if ed.allocation_mode is AllocationMode.PER_TARGET:
+                    # Un importe por destino. El mismo concepto puede existir en
+                    # varias sucursales y centros de costo con montos distintos;
+                    # donde no corresponde se carga 0.
+                    for t in ed.targets:
+                        key = nk("EXPENSE_INPUT", f"EXP:{ed.id}@{t.scope_key}", p.code)
+                        self.g.constant(
+                            key, loaded[(ed.id, t.scope_key)].get(p, ZERO), kind="INPUT",
+                            expense=ed.name, target=cfg.scope_label(t.scope_key),
+                            currency=ed.currency, frequency=ed.frequency.value)
+                        route(t, key, p)
                 else:
-                    targets = [(ed.level.value, ed.target_id, Decimal(1))]
-
-                for ttype, tid, pct in targets:
-                    part_key = nk("EXPENSE_PART", f"EXP:{ed.id}@{ttype}:{tid or 'CO'}", p.code)
-                    self.g.calc(
-                        part_key, [total_key],
-                        lambda v, k=total_key, q=pct: None if v.get(k) is None else v[k] * q,
-                        formula="gasto x % de distribución", percentage=str(pct),
-                    )
-
-                    if ttype == "BRANCH":
-                        branch_parts[scope_br(tid)].append(part_key)
-                    elif ttype == "COST_CENTER":
-                        su = cfg.cost_center_owner(tid)
-                        support_parts[scope_su(su.id)].append(part_key)
-                    elif ttype == "BUSINESS_UNIT":
-                        if ed.distribute_to_branches:
-                            unit = cfg.unit(tid)
-                            for b in unit.branches:
-                                sub = nk("EXPENSE_PART",
-                                         f"EXP:{ed.id}@{ttype}:{tid}>BR:{b.id}", p.code)
-                                sfy_br = nk("SALES", scope_br(b.id), FY)
-                                sfy_bu = nk("SALES", scope_bu(tid), FY)
-                                self.g.calc(
-                                    sub, [part_key, sfy_br, sfy_bu],
-                                    self._proportional(part_key, sfy_br, sfy_bu),
-                                    formula="gasto de unidad distribuido a sucursal "
-                                            "proporcional a ventas anuales",
-                                )
-                                branch_parts[scope_br(b.id)].append(sub)
-                            # si la unidad no tiene ventas, el gasto queda corporativo de la unidad
-                            sfy_bu = nk("SALES", scope_bu(tid), FY)
-                            residual = nk("EXPENSE_PART", f"EXP:{ed.id}@{ttype}:{tid}>CORP", p.code)
-                            self.g.calc(
-                                residual, [part_key, sfy_bu],
-                                lambda v, k=part_key, s=sfy_bu: (
-                                    (v.get(k) or ZERO) if not (v.get(s) or ZERO) else ZERO
-                                ),
-                                formula="residual corporativo de la unidad (sin ventas)",
-                            )
-                            unit_parts[scope_bu(tid)].append(residual)
-                        else:
-                            unit_parts[scope_bu(tid)].append(part_key)
-                    else:  # COMPANY
-                        company_parts.append(part_key)
+                    total_key = nk("EXPENSE_INPUT", f"EXP:{ed.id}", p.code)
+                    self.g.constant(total_key, loaded[(ed.id, "CO")].get(p, ZERO), kind="INPUT",
+                                    expense=ed.name, currency=ed.currency,
+                                    frequency=ed.frequency.value)
+                    for t in ed.targets:
+                        part_key = nk("EXPENSE_PART", f"EXP:{ed.id}@{t.scope_key}", p.code)
+                        pct = t.percentage or ZERO
+                        self.g.calc(
+                            part_key, [total_key],
+                            lambda v, k=total_key, q=pct: None if v.get(k) is None else v[k] * q,
+                            formula="gasto x % de distribución", percentage=str(pct),
+                            target=cfg.scope_label(t.scope_key))
+                        route(t, part_key, p)
 
         # gastos propios por ámbito
         for unit in cfg.business_units:
-            for b in unit.branches:
+            for b in cfg.unit_branches(unit.id):
                 keys = branch_parts.get(scope_br(b.id), [])
                 for p in self.periods:
                     pk = [k for k in keys if k.endswith(f"|{p.code}")]
@@ -457,7 +463,7 @@ class BudgetEngine:
         cfg = self.cfg
 
         for unit in cfg.business_units:
-            br_scopes = [scope_br(b.id) for b in unit.branches]
+            br_scopes = [scope_br(b.id) for b in cfg.unit_branches(unit.id)]
             for p in self.periods:
                 for metric in ("SALES", "COGS", "GROSS_MARGIN", "PAYROLL", "HEADCOUNT", "COMMISSION"):
                     keys = [nk(metric, s, p.code) for s in br_scopes]
@@ -477,7 +483,7 @@ class BudgetEngine:
         # EBITDA por sucursal, unidad, soporte y empresa
         for p in self.periods:
             for unit in cfg.business_units:
-                for b in unit.branches:
+                for b in cfg.unit_branches(unit.id):
                     self._ebitda(scope_br(b.id), p.code)
                     self.g.calc(nk("CAPEX", scope_br(b.id), p.code),
                                 [nk("CAPEX_OWN", scope_br(b.id), p.code)],
@@ -553,7 +559,7 @@ class BudgetEngine:
                 )
                 self._after_allocation(scope_bu(unit.id), p.code)
 
-                for b in unit.branches:
+                for b in cfg.unit_branches(unit.id):
                     sfy_br = nk("SALES", scope_br(b.id), FY)
                     corp_from_co = nk("ALLOC_FROM_COMPANY", scope_br(b.id), p.code)
                     self.g.calc(corp_from_co, [pool, sfy_br, sfy_co],
@@ -591,7 +597,7 @@ class BudgetEngine:
         if cfg.inventory.level is InventoryLevel.COMPANY:
             return [(scope_co(), [b.id for _, b in cfg.all_branches()])]
         if cfg.inventory.level is InventoryLevel.BUSINESS_UNIT:
-            return [(scope_bu(u.id), [b.id for b in u.branches]) for u in cfg.business_units]
+            return [(scope_bu(u.id), [b.id for b in cfg.unit_branches(u.id)]) for u in cfg.business_units]
         return [(scope_br(b.id), [b.id]) for _, b in cfg.all_branches()]
 
     def _build_inventory(self) -> None:
@@ -695,7 +701,7 @@ class BudgetEngine:
         rollups: list[tuple[str, list[str]]] = []
         if level is InventoryLevel.BRANCH:
             for u in cfg.business_units:
-                rollups.append((scope_bu(u.id), [scope_br(b.id) for b in u.branches]))
+                rollups.append((scope_bu(u.id), [scope_br(b.id) for b in cfg.unit_branches(u.id)]))
             rollups.append((scope_co(), [scope_bu(u.id) for u in cfg.business_units]))
         elif level is InventoryLevel.BUSINESS_UNIT:
             rollups.append((scope_co(), [scope_bu(u.id) for u in cfg.business_units]))
