@@ -37,8 +37,10 @@ CREATE TABLE capability_grant (
     id              BIGSERIAL PRIMARY KEY,
     user_id         UUID NOT NULL REFERENCES app_user(id),
     capability      TEXT NOT NULL,            -- budget.expense.load, budget.approve, ...
-    scope_type      TEXT NOT NULL,            -- COMPANY | BUSINESS_UNIT | BRANCH | COST_CENTER
+    scope_type      TEXT NOT NULL,            -- COMPANY | BUSINESS_UNIT | BRANCH | OPERATION | SUPPORT_UNIT | COST_CENTER
     scope_id        TEXT,                     -- NULL = transversal
+    -- El alcance sobre un contenedor alcanza a lo contenido: quien tiene la
+    -- sucursal tiene sus operaciones; quien tiene la unidad, las suyas.
     UNIQUE (user_id, capability, scope_type, scope_id)
 );
 
@@ -88,7 +90,9 @@ CREATE TABLE input_value (
     id              BIGSERIAL PRIMARY KEY,
     version_id      UUID NOT NULL REFERENCES budget_version(id),
     concept         TEXT NOT NULL,            -- SALES_QTY, EXPENSE_AMOUNT, ...
-    scope_type      TEXT NOT NULL,            -- COMPANY | BUSINESS_UNIT | BRANCH | COST_CENTER
+    -- OPERATION es la combinación unidad x sucursal: la unidad mínima del
+    -- presupuesto. Ventas y dotación se cargan siempre ahí.
+    scope_type      TEXT NOT NULL,            -- COMPANY | BUSINESS_UNIT | BRANCH | OPERATION | SUPPORT_UNIT | COST_CENTER
     scope_id        TEXT,
     product_id      TEXT,
     family_id       TEXT,

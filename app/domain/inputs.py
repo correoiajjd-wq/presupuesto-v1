@@ -72,6 +72,7 @@ class InputValue(BaseModel):
 
     business_unit_id: Optional[str] = None
     branch_id: Optional[str] = None
+    operation_id: Optional[str] = None      # combinación unidad x sucursal
     support_unit_id: Optional[str] = None
     cost_center_id: Optional[str] = None
     product_id: Optional[str] = None
@@ -95,6 +96,8 @@ class InputValue(BaseModel):
 
     @property
     def scope_key(self) -> str:
+        if self.operation_id:
+            return f"OP:{self.operation_id}"
         if self.branch_id:
             return f"BR:{self.branch_id}"
         if self.business_unit_id:

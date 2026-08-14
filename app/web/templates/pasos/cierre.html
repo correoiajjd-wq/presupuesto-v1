@@ -37,7 +37,9 @@
 <tr><td>Ejercicio</td><td>{{ cfg.fiscal_year_start }} a {{ cfg.fiscal_year_end }}
   ({{ cfg.periods|length }} períodos)</td></tr>
 <tr><td>Monedas</td><td>{{ cfg.enabled_currencies|join(', ') }} · presenta en {{ cfg.presentation_currency }}</td></tr>
-<tr><td>Unidades / sucursales</td><td>{{ cfg.business_units|length }} / {{ cfg.all_branches()|length }}</td></tr>
+<tr><td>Unidades / sucursales</td><td>{{ cfg.business_units|length }} / {{ cfg.branches|length }}</td></tr>
+<tr><td>Operaciones</td><td>{{ cfg.operations|length }} combinaciones unidad x sucursal,
+  cada una con su centro de costo</td></tr>
 <tr><td>Productos / familias</td>
   <td>{{ cfg.business_units|map(attribute='products')|map('length')|sum }} /
       {{ cfg.business_units|map(attribute='families')|map('length')|sum }}</td></tr>

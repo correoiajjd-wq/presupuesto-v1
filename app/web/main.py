@@ -214,9 +214,9 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def plantilla(task_id):
         v = version()
         task = v.tasks[task_id]
-        branch_id = task.scope_key.split(":", 1)[1]
-        return send_file(BytesIO(sales_template(v, branch_id)), as_attachment=True,
-                         download_name=f"ventas_{branch_id}.xlsx",
+        operation_id = task.scope_key.split(":", 1)[1]
+        return send_file(BytesIO(sales_template(v, operation_id)), as_attachment=True,
+                         download_name=f"ventas_{operation_id}.xlsx",
                          mimetype="application/vnd.openxmlformats-officedocument."
                                   "spreadsheetml.sheet")
 
@@ -224,12 +224,12 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def importar(task_id):
         v = version()
         task = v.tasks[task_id]
-        branch_id = task.scope_key.split(":", 1)[1]
+        operation_id = task.scope_key.split(":", 1)[1]
         file = request.files.get("file")
         if not file or not file.filename:
             flash("Elegí un archivo.", "error")
             return redirect(url_for("carga", task_id=task_id))
-        result, parsed = parse_sales_import(v, file.read(), branch_id, session["user_id"])
+        result, parsed = parse_sales_import(v, file.read(), operation_id, session["user_id"])
         if result.status == "REJECTED":
             return render_template("import_errores.html", task=task, result=result)
         commit_import(service, session["user_id"], v, parsed)
@@ -379,7 +379,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         handlers = {
             "general": wizard.update_general, "fx": wizard.set_fx_rate,
             "unidad": wizard.add_business_unit, "sucursal": wizard.add_branch,
-            "asignar": wizard.assign_branch,
+            "operacion": wizard.add_operation,
             "soporte": wizard.add_support_unit, "centro": wizard.add_cost_center,
             "familia": wizard.add_family, "producto": wizard.add_product,
             "gasto": wizard.add_expense, "area": wizard.add_payroll_area,

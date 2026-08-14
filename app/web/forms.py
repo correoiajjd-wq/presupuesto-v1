@@ -91,9 +91,10 @@ def build_form(version, task) -> FormSpec:
 
 
 def _sales_form(cfg: Configuration, version, task) -> FormSpec:
-    branch_id = task.scope_key.split(":", 1)[1]
-    unit = cfg.branch_owner(branch_id)
-    branch = cfg.branch(branch_id)
+    operation_id = task.scope_key.split(":", 1)[1]
+    op = cfg.operation(operation_id)
+    unit = cfg.unit(op.business_unit_id)
+    branch = cfg.branch(op.branch_id)
     fy = cfg.fiscal_year
     qty = _index(version, Concept.SALES_QTY)
     amt = _index(version, Concept.SALES_AMOUNT)
@@ -103,7 +104,8 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
         unit_based = product.sales_mode is SalesMode.UNIT_BASED
         current = qty if unit_based else amt
         for head, bucket in fy.iter_buckets(product.sales_frequency):
-            if not any(cfg.is_active(branch, p) for p in bucket):
+            if not any(cfg.is_active(op, p) and cfg.is_active(unit, p)
+                       and cfg.is_active(branch, p) for p in bucket):
                 continue
             key = SEP.join([task.scope_key, product.id, "", "", "", "", head.code])
             detail = (f"precio {product.price} {product.currency}" if unit_based
@@ -120,6 +122,8 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
                                currency="unidades" if unit_based else product.currency)]))
     return FormSpec(
         f"Ventas — {unit.name} / {branch.name}",
+        f"Se carga la operación de {unit.name} en {branch.name}; los gastos propios de esta "
+        f"combinación van al centro de costo {op.cost_center.code}. "
         "Cada producto se carga como lo define la configuración: por cantidad o por monto. "
         "El precio y el margen no se tocan acá; el sistema calcula ventas, costo y margen. "
         "Si un producto no se vende, cargá 0 (vacío es error).",
@@ -180,7 +184,8 @@ def _capex_form(cfg: Configuration, version) -> FormSpec:
     items = [iv for iv in version.inputs.values if iv.concept is Concept.CAPEX_AMOUNT]
     scopes = ([("CO", "Empresa")]
               + [(f"BU:{u.id}", u.name) for u in cfg.business_units]
-              + [(f"BR:{b.id}", f"{u.name} / {b.name}") for u, b in cfg.all_branches()]
+              + [(f"BR:{b.id}", b.name) for b in cfg.branches]
+              + [(f"OP:{o.id}", cfg.operation_label(o.id)) for o in cfg.operations]
               + [(f"SU:{u.id}", u.name) for u in cfg.support_units])
     return FormSpec("CAPEX", "Sin depreciación en V1: se carga la inversión y el período.",
                     [], [], "budget.expense.load",
@@ -195,8 +200,8 @@ def _stock_form(cfg: Configuration, version) -> FormSpec:
     level = cfg.inventory.level.value
     scopes = {"COMPANY": [("CO", "Empresa")],
               "BUSINESS_UNIT": [(f"BU:{u.id}", u.name) for u in cfg.business_units],
-              "BRANCH": [(f"BR:{b.id}", f"{u.name} / {b.name}")
-                         for u, b in cfg.all_branches()]}[level]
+              "OPERATION": [(f"OP:{o.id}", cfg.operation_label(o.id))
+                            for o in cfg.operations]}[level]
     open_cur = _index(version, Concept.OPENING_STOCK)
     pur_cur = _index(version, Concept.PURCHASES)
     fam_names = {f.id: f.name for u in cfg.business_units for f in u.families}
@@ -215,8 +220,10 @@ def _stock_form(cfg: Configuration, version) -> FormSpec:
                                          value=_fmt(pur_cur.get(pkey)),
                                          currency=cfg.inventory.currency))
             rows.append(Row(label=f"{fam_names.get(fam, fam)}", detail=scope_label, fields=fields))
+    nivel = {"COMPANY": "empresa", "BUSINESS_UNIT": "unidad de negocio",
+             "OPERATION": "operación (unidad x sucursal)"}[level]
     return FormSpec("Stock y compras",
-                    f"El stock se administra por familia a nivel {level.lower()}, en "
+                    f"El stock se administra por familia a nivel {nivel}, en "
                     f"{cfg.inventory.currency}. El stock final no se carga: lo calcula el "
                     "sistema como stock anterior + compras − costo de venta.",
                     ["Familia", "Ámbito"], rows, "budget.expense.load")
@@ -275,15 +282,17 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
             continue
 
         if parts[0] == "S":
-            branch_id = task.scope_key.split(":", 1)[1]
-            unit = cfg.branch_owner(branch_id)
+            operation_id = task.scope_key.split(":", 1)[1]
+            op = cfg.operation(operation_id)
+            unit = cfg.unit(op.business_unit_id)
             product = unit.product(parts[1])
             unit_based = product.sales_mode is SalesMode.UNIT_BASED
             pending.append(InputValue(
                 concept=Concept.SALES_QTY if unit_based else Concept.SALES_AMOUNT,
                 period=parts[2], value=value,
                 currency=None if unit_based else product.currency,
-                business_unit_id=unit.id, branch_id=branch_id, product_id=product.id))
+                operation_id=op.id, business_unit_id=unit.id, branch_id=op.branch_id,
+                product_id=product.id))
         elif parts[0] == "E":
             ed = cfg.expense(parts[1])
             iv = InputValue(concept=Concept.EXPENSE_AMOUNT, period=parts[3],
@@ -318,10 +327,13 @@ def _set_scope(iv: InputValue, scope_key: str, cfg: Configuration) -> None:
     if not scope_key or scope_key == "CO":
         return
     kind, _id = scope_key.split(":", 1)
-    if kind == "BR":
+    if kind == "OP":
+        op = cfg.operation(_id)
+        iv.operation_id = op.id
+        iv.business_unit_id = op.business_unit_id
+        iv.branch_id = op.branch_id
+    elif kind == "BR":
         iv.branch_id = _id
-        b = cfg.branch(_id)
-        iv.business_unit_id = b.business_unit_id
     elif kind == "BU":
         iv.business_unit_id = _id
     elif kind == "SU":

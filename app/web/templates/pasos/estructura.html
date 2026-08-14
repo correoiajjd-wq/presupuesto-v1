@@ -1,28 +1,17 @@
 <h3>1. Sucursales de la empresa</h3>
 <div class="panel">
-<p class="small">Se dan de alta acá una sola vez, con su nombre definitivo, y se asignan a
-su unidad de negocio desde la misma fila. Una unidad puede tener varias sucursales; cada
-sucursal pertenece a una sola unidad.</p>
-<table><thead><tr><th>Sucursal</th><th>Unidad de negocio</th><th>Vigencia</th><th></th></tr></thead>
+<p class="small">Una sucursal es una ubicación física y existe por sí misma. Se da de alta
+acá una sola vez, con su nombre definitivo. Qué unidades de negocio operan en ella se define
+más abajo, en las operaciones.</p>
+<table><thead><tr><th>Sucursal</th><th>Unidades que operan acá</th><th>Vigencia</th><th></th></tr></thead>
 <tbody>
 {% for b in cfg.branches %}
 <tr>
   <td>{{ b.name }} <span class="small">{{ b.id }}</span></td>
-  <td>
-    {% if editable and cfg.business_units %}
-    <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='asignar') }}"
-          class="row" style="flex-wrap:nowrap;justify-content:flex-end;gap:6px">
-      <input type="hidden" name="branch_id" value="{{ b.id }}">
-      <select name="business_unit_id" style="width:auto">
-        <option value="" {{ 'selected' if not b.assigned }}>— sin asignar —</option>
-        {% for u in cfg.business_units %}
-        <option value="{{ u.id }}" {{ 'selected' if b.business_unit_id == u.id }}>{{ u.name }}</option>
-        {% endfor %}
-      </select>
-      <button class="ghost" style="padding:3px 10px">Guardar</button>
-    </form>
-    {% elif b.assigned %}{{ cfg.unit(b.business_unit_id).name }}
-    {% else %}<span class="tag warn">sin asignar</span>{% endif %}
+  <td class="small">
+    {% if cfg.branch_operations(b.id) %}
+      {{ cfg.branch_units(b.id)|map(attribute='name')|join(', ') }}
+    {% else %}<span class="tag warn">sin unidad</span>{% endif %}
   </td>
   <td class="small">{{ b.effective_from or 'todo el ejercicio' }}{% if b.effective_to %} → {{ b.effective_to }}{% endif %}</td>
   <td>{% if editable %}<form method="post"
@@ -33,15 +22,6 @@ sucursal pertenece a una sola unidad.</p>
 <tr><td colspan="4" class="small">Todavía no hay sucursales.</td></tr>
 {% endfor %}
 </tbody></table>
-{% if cfg.branches and not cfg.business_units %}
-<p class="small" style="color:var(--warn)">Creá primero una unidad de negocio, más abajo, y
-después volvé acá para asignar cada sucursal.</p>
-{% endif %}
-{% if cfg.unassigned_branches() and cfg.business_units %}
-<p class="small" style="color:var(--warn)">Sin asignar:
-  {{ cfg.unassigned_branches()|map(attribute='name')|join(', ') }}.
-  Una sucursal sin unidad no genera cargas y no deja cerrar la configuración.</p>
-{% endif %}
 
 {% if editable %}
 <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='sucursal') }}"
@@ -58,7 +38,7 @@ de tener ventas: el sistema respeta la fecha de cada concepto.</p>
 
 <h3>2. Unidades de negocio</h3>
 <div class="panel">
-<table><thead><tr><th>Unidad</th><th>Sucursales</th><th>Vigencia</th><th></th></tr></thead>
+<table><thead><tr><th>Unidad</th><th>Opera en</th><th>Vigencia</th><th></th></tr></thead>
 <tbody>
 {% for u in cfg.business_units %}
 <tr>
@@ -92,30 +72,106 @@ de tener ventas: el sistema respeta la fecha de cada concepto.</p>
 {% endif %}
 </div>
 
-<h3>3. Unidades de soporte y centros de costo</h3>
+<h3>3. Operaciones: qué unidad opera en qué sucursal</h3>
 <div class="panel">
-<table><thead><tr><th>Unidad de soporte</th><th>Centros de costo</th><th></th></tr></thead><tbody>
+<p class="small">La operación es la unidad mínima del presupuesto: ahí se cargan las ventas
+y la dotación, y contra su centro de costo se imputan sus gastos. La relación es de muchos a
+muchos: una unidad puede operar en varias sucursales y una sucursal alojar varias unidades.
+Unidades y sucursales son dos maneras de agrupar las mismas operaciones, por eso sus
+resultados no se suman entre sí.</p>
+<table><thead><tr><th>Unidad de negocio</th><th>Sucursal</th><th>Centro de costo</th>
+<th>Vigencia</th><th></th></tr></thead><tbody>
+{% for o in cfg.operations %}
+<tr>
+  <td>{{ cfg.unit(o.business_unit_id).name }}</td>
+  <td>{{ cfg.branch(o.branch_id).name }}</td>
+  <td><b>{{ o.cost_center.code }}</b> <span class="small">{{ o.cost_center.name }}</span></td>
+  <td class="small">{{ o.effective_from or 'todo el ejercicio' }}{% if o.effective_to %} → {{ o.effective_to }}{% endif %}</td>
+  <td>{% if editable %}<form method="post"
+      action="{{ url_for('configurar_borrar', step='estructura', kind='operation', entity_id=o.id) }}">
+      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="small">Todavía no hay ninguna unidad operando en ninguna sucursal.</td></tr>
+{% endfor %}
+</tbody></table>
+
+{% if cfg.unassigned_branches() %}
+<p class="small" style="color:var(--warn)">Sucursales sin ninguna unidad:
+  {{ cfg.unassigned_branches()|map(attribute='name')|join(', ') }}.
+  No generan cargas y no dejan cerrar la configuración.</p>
+{% endif %}
+{% if cfg.units_without_operations() %}
+<p class="small" style="color:var(--warn)">Unidades que no operan en ninguna sucursal:
+  {{ cfg.units_without_operations()|map(attribute='name')|join(', ') }}.</p>
+{% endif %}
+
+{% if editable %}
+{% if cfg.business_units and cfg.branches %}
+<form method="post" action="{{ url_for('configurar_accion', step='estructura', action='operacion') }}"
+      style="margin-top:14px">
+  <div class="row">
+    <div style="flex:1"><label class="small">Unidad de negocio</label>
+      <select name="business_unit_id" required>
+        {% for u in cfg.business_units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+      </select></div>
+    <div style="flex:1"><label class="small">Sucursal</label>
+      <select name="branch_id" required>
+        {% for b in cfg.branches %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
+      </select></div>
+    <div style="flex:1"><label class="small">Código del centro de costo</label>
+      <input type="text" name="cost_center_code" placeholder="CC-101" required></div>
+    <div style="flex:1"><label class="small">Nombre (opcional)</label>
+      <input type="text" name="cost_center_name" placeholder="unidad / sucursal"></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div style="flex:1"><label class="small">Inicio (opcional)</label>
+      <input type="date" name="effective_from"></div>
+    <div style="flex:1"><label class="small">Cierre (opcional)</label>
+      <input type="date" name="effective_to"></div>
+    <div style="flex:2;align-self:flex-end"><button>Crear operación</button></div>
+  </div>
+  <p class="small" style="margin-top:8px">El código del centro de costo tiene que ser único en
+  toda la empresa: es la cuenta contra la que se registran los gastos propios de esta
+  combinación.</p>
+</form>
+{% else %}
+<p class="small" style="color:var(--warn)">Necesitás al menos una unidad de negocio y una
+sucursal para poder crear una operación.</p>
+{% endif %}
+{% endif %}
+</div>
+
+<h3>4. Áreas de soporte y sus centros de costo</h3>
+<div class="panel">
+<p class="small">Administración, sistemas, dirección: no venden, pero gastan. Sus gastos y su
+nómina forman el pool corporativo que después se asigna a las operaciones por debajo del
+EBITDA propio.</p>
+<table><thead><tr><th>Área de soporte</th><th>Centros de costo</th><th></th></tr></thead><tbody>
 {% for s in cfg.support_units %}
 <tr><td><b>{{ s.name }}</b> <span class="small">{{ s.id }}</span></td>
-  <td class="small">{{ s.cost_centers|map(attribute='name')|join(', ') or '—' }}</td>
+  <td class="small">
+    {% for c in s.cost_centers %}{{ c.code }} — {{ c.name }}{% if not loop.last %} · {% endif %}
+    {% else %}—{% endfor %}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='support_unit', entity_id=s.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
 {% else %}
-<tr><td colspan="3" class="small">Sin unidades de soporte. Son opcionales.</td></tr>
+<tr><td colspan="3" class="small">Sin áreas de soporte. Son opcionales.</td></tr>
 {% endfor %}
 </tbody></table>
 {% if editable %}
 <div class="row" style="margin-top:14px">
   <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='soporte') }}" class="row">
-    <input type="text" name="name" placeholder="Nueva unidad de soporte" required style="width:230px">
+    <input type="text" name="name" placeholder="Nueva área de soporte" required style="width:230px">
     <button class="ghost">Agregar</button>
   </form>
   {% if cfg.support_units %}
   <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='centro') }}" class="row">
     <select name="support_unit_id" style="width:auto">
       {% for s in cfg.support_units %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
-    <input type="text" name="name" placeholder="Centro de costo" required style="width:200px">
+    <input type="text" name="code" placeholder="Código" required style="width:110px">
+    <input type="text" name="name" placeholder="Centro de costo" required style="width:190px">
     <button class="ghost">Agregar centro</button>
   </form>
   {% endif %}

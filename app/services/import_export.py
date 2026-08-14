@@ -54,11 +54,12 @@ class ImportResult:
 # ==========================================================================
 # Plantilla de ventas
 # ==========================================================================
-def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
-    """Genera la planilla que le corresponde a ese gerente y a nadie más."""
+def sales_template(version: BudgetVersion, operation_id: str) -> bytes:
+    """Genera la planilla que le corresponde a esa operación y a nadie más."""
     cfg = version.configuration
-    unit = cfg.branch_owner(branch_id)
-    branch = cfg.branch(branch_id)
+    op = cfg.operation(operation_id)
+    unit = cfg.unit(op.business_unit_id)
+    branch = cfg.branch(op.branch_id)
     fy = cfg.fiscal_year
 
     wb = Workbook()
@@ -77,7 +78,8 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
     row = 2
     for product in unit.products:
         for head, bucket in fy.iter_buckets(product.sales_frequency):
-            if not any(cfg.is_active(branch, p) for p in bucket):
+            if not any(cfg.is_active(op, p) and cfg.is_active(unit, p)
+                       and cfg.is_active(branch, p) for p in bucket):
                 continue
             unit_based = product.sales_mode is SalesMode.UNIT_BASED
             ws.append([unit.name, branch.name, product.name, product.code,
@@ -100,7 +102,7 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
         "La estructura de esta planilla la define la configuración aprobada; no se puede modificar.",
         "Cargue únicamente la columna VALOR: cantidad o monto según diga MODALIDAD.",
         "0 es un valor válido. Una celda vacía es un error si el campo es obligatorio.",
-        "Si la sucursal no vende un producto, cargue 0.",
+        "Si esta operación no vende un producto, cargue 0.",
         "La importación es atómica: un solo error rechaza toda la planilla.",
         "El precio y el margen los define la configuración; no se cargan acá.",
     ]
@@ -113,10 +115,11 @@ def sales_template(version: BudgetVersion, branch_id: str) -> bytes:
     return buf.getvalue()
 
 
-def parse_sales_import(version: BudgetVersion, data: bytes, branch_id: str,
+def parse_sales_import(version: BudgetVersion, data: bytes, operation_id: str,
                        actor: str) -> tuple[ImportResult, list[InputValue]]:
     cfg = version.configuration
-    unit = cfg.branch_owner(branch_id)
+    op = cfg.operation(operation_id)
+    unit = cfg.unit(op.business_unit_id)
     fy = cfg.fiscal_year
     errors: list[ImportError_] = []
     parsed: list[InputValue] = []
@@ -187,7 +190,8 @@ def parse_sales_import(version: BudgetVersion, data: bytes, branch_id: str,
             period=period.code, value=value,
             currency=None if unit_based else (ccy if ccy and ccy != "UNIDADES"
                                               else product.currency),
-            business_unit_id=unit.id, branch_id=branch_id, product_id=product.id,
+            operation_id=operation_id, business_unit_id=unit.id,
+            branch_id=op.branch_id, product_id=product.id,
             source=InputSource.IMPORT, loaded_by=actor,
         ))
 

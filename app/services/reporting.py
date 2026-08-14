@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Optional
 
 from ..domain.config import Configuration
-from ..domain.engine import FY, scope_br, scope_bu, scope_co, scope_su
+from ..domain.engine import FY, scope_br, scope_bu, scope_co, scope_op, scope_su
 from ..domain.graph import DependencyGraph, nk
 from ..domain.ratios import RATIO_CATALOG, format_ratio
 
@@ -33,10 +33,14 @@ SUBTOTALS = {"GROSS_MARGIN", "EBITDA", "RESULT_AFTER_ALLOCATION"}
 def scopes_of(cfg: Configuration) -> list[tuple[str, str, str]]:
     """(scope_key, etiqueta, nivel)"""
     out = [(scope_co(), cfg.company_name, "COMPANY")]
+    # Unidades y sucursales son dos agrupaciones de las mismas operaciones:
+    # se listan por separado, y sus resultados no se suman entre sí.
     for u in cfg.business_units:
         out.append((scope_bu(u.id), u.name, "BUSINESS_UNIT"))
-        for b in cfg.unit_branches(u.id):
-            out.append((scope_br(b.id), f"{u.name} / {b.name}", "BRANCH"))
+        for o in cfg.unit_operations(u.id):
+            out.append((scope_op(o.id), f"{u.name} / {cfg.branch(o.branch_id).name}", "OPERATION"))
+    for b in cfg.branches:
+        out.append((scope_br(b.id), b.name, "BRANCH"))
     for su in cfg.support_units:
         out.append((scope_su(su.id), su.name, "SUPPORT_UNIT"))
     return out
@@ -161,7 +165,11 @@ def configuration_checklist(cfg: Configuration) -> list[dict]:
         ("Ejercicio", state(cfg.fiscal_year_end > cfg.fiscal_year_start,
                             f"{cfg.fiscal_year_start} a {cfg.fiscal_year_end}")),
         ("Unidades de negocio", state(bool(cfg.business_units), f"{len(cfg.business_units)}")),
-        ("Sucursales", state(bool(cfg.all_branches()), f"{len(cfg.all_branches())}")),
+        ("Sucursales", state(bool(cfg.branches), f"{len(cfg.branches)}")),
+        ("Operaciones (unidad x sucursal)",
+         state(bool(cfg.operations) and not cfg.unassigned_branches()
+               and not cfg.units_without_operations(),
+               f"{len(cfg.operations)} con centro de costo")),
         ("Unidades de soporte", state(bool(cfg.support_units), f"{len(cfg.support_units)}")),
         ("Productos", state(all(u.products for u in cfg.business_units),
                             f"{sum(len(u.products) for u in cfg.business_units)}")),

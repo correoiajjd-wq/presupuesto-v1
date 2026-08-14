@@ -3,7 +3,10 @@
 ACME Distribución S.A. — ejercicio 2027
   - 2 unidades de negocio con modalidades de venta distintas (unidades y monto)
   - 3 sucursales, una de las cuales abre en junio
-  - 1 unidad de soporte con centro de costo
+  - 4 operaciones (unidad x sucursal), cada una con su centro de costo:
+    Montevideo aloja dos unidades y Servicios opera en dos sucursales, así que
+    la relación n a n queda ejercitada en las dos direcciones
+  - 1 área de soporte con centro de costo
   - gastos propios, de unidad distribuidos a sucursal, distribuidos por %,
     corporativos de empresa y de soporte
   - nómina con dotación inicial, altas, bajas, aumentos y comisiones
@@ -20,7 +23,8 @@ from app.domain.config import (
     BusinessUnit, CapexCategory, CapexConfig, Configuration, CostCenter, ExpenseDefinition,
     ExpenseTarget, ExpenseTargetType, InventoryConfig, InventoryLevel, MarginFormula, Objective,
     ObjectiveType, PayrollArea, PayrollConfig, PayrollPercentageConcept, Product, ProductFamily,
-    RatioSelection, Role, SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowConfig, WorkflowStep,
+    Operation, RatioSelection, Role, SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowConfig,
+    WorkflowStep,
 )
 from app.domain.inputs import ChangeType, Concept, InputSet, InputValue
 from app.domain.money import FXTable
@@ -84,13 +88,28 @@ def build_configuration() -> Configuration:
         ],
     )
     branches = [
-        Branch(id="BR-01", name="Montevideo", business_unit_id="BU-01"),
-        Branch(id="BR-02", name="Salto", business_unit_id="BU-01",
-               effective_from=date(2027, 6, 1)),
-        Branch(id="BR-03", name="Centro", business_unit_id="BU-02"),
+        Branch(id="BR-01", name="Montevideo"),
+        Branch(id="BR-02", name="Salto", effective_from=date(2027, 6, 1)),
+        Branch(id="BR-03", name="Centro"),
+    ]
+    # Cada combinación unidad x sucursal es una operación con su centro de costo.
+    operations = [
+        Operation(id="OP-01", business_unit_id="BU-01", branch_id="BR-01",
+                  cost_center=CostCenter(id="CC-101", code="101",
+                                         name="Repuestos Montevideo")),
+        Operation(id="OP-02", business_unit_id="BU-01", branch_id="BR-02",
+                  cost_center=CostCenter(id="CC-102", code="102", name="Repuestos Salto")),
+        Operation(id="OP-03", business_unit_id="BU-02", branch_id="BR-03",
+                  cost_center=CostCenter(id="CC-103", code="103", name="Servicios Centro")),
+        # Servicios también opera dentro de la sucursal Montevideo: la misma
+        # sucursal aloja dos unidades y cada una tiene su propio centro de costo.
+        Operation(id="OP-04", business_unit_id="BU-02", branch_id="BR-01",
+                  cost_center=CostCenter(id="CC-104", code="104",
+                                         name="Servicios Montevideo")),
     ]
     soporte = SupportUnit(id="SU-01", name="Administración central",
-                          cost_centers=[CostCenter(id="CC-01", name="Administración")])
+                          cost_centers=[CostCenter(id="CC-01", code="900",
+                                                   name="Administración")])
 
     def target(kind: str, tid=None, pct=None, split=False) -> ExpenseTarget:
         return ExpenseTarget(target_type=ExpenseTargetType(kind), target_id=tid,
@@ -197,13 +216,13 @@ def build_configuration() -> Configuration:
         company_name="ACME Distribución S.A.",
         fiscal_year_start=FY_START, fiscal_year_end=FY_END,
         presentation_currency="USD", enabled_currencies=["USD", "UYU", "ARS"],
-        business_units=[repuestos, servicios], branches=branches,
+        business_units=[repuestos, servicios], branches=branches, operations=operations,
         support_units=[soporte],
         expenses=expenses, payroll=payroll,
         capex=CapexConfig(enabled=True, frequency=Frequency.MONTHLY,
                           categories=[CapexCategory(id="CAT-01", name="Maquinaria"),
                                       CapexCategory(id="CAT-02", name="Tecnología")]),
-        inventory=InventoryConfig(enabled=True, level=InventoryLevel.BRANCH,
+        inventory=InventoryConfig(enabled=True, level=InventoryLevel.OPERATION,
                                   frequency=Frequency.QUARTERLY, currency="USD",
                                   purchases_enabled=True),
         balance=balance, ratios=ratios, workflow=workflow,
@@ -231,7 +250,16 @@ def _expense(scope: str, expense_id: str, period: str, value: Decimal,
         iv.business_unit_id = scope.split(":", 1)[1]
     elif scope.startswith("CC:"):
         iv.cost_center_id = scope.split(":", 1)[1]
+    elif scope.startswith("OP:"):
+        iv.operation_id = scope.split(":", 1)[1]
     return iv
+
+
+def _op_active(cfg: Configuration, op_id: str, period) -> bool:
+    op = cfg.operation(op_id)
+    return (cfg.is_active(op, period)
+            and cfg.is_active(cfg.unit(op.business_unit_id), period)
+            and cfg.is_active(cfg.branch(op.branch_id), period))
 
 
 def build_inputs(cfg: Configuration) -> InputSet:
@@ -239,38 +267,46 @@ def build_inputs(cfg: Configuration) -> InputSet:
     fy = cfg.fiscal_year
     months = fy.periods
 
-    # ---- Ventas BU-01 (por unidades) ----
+    # ---- Ventas BU-01 (por unidades), por operación ----
     monthly_qty = {
-        ("BR-01", "P-001"): 2500, ("BR-01", "P-003"): 300, ("BR-01", "P-099"): 600,
-        ("BR-02", "P-001"): 900, ("BR-02", "P-003"): 120, ("BR-02", "P-099"): 250,
+        ("OP-01", "P-001"): 2500, ("OP-01", "P-003"): 300, ("OP-01", "P-099"): 600,
+        ("OP-02", "P-001"): 900, ("OP-02", "P-003"): 120, ("OP-02", "P-099"): 250,
     }
-    quarterly_qty = {("BR-01", "P-002"): 400, ("BR-02", "P-002"): 150}
-    for branch_id in ("BR-01", "BR-02"):
-        branch = cfg.branch(branch_id)
+    quarterly_qty = {("OP-01", "P-002"): 400, ("OP-02", "P-002"): 150}
+    for op_id in ("OP-01", "OP-02"):
+        op = cfg.operation(op_id)
         for p in months:
-            if not cfg.is_active(branch, p):
+            if not _op_active(cfg, op_id, p):
                 continue
-            for (b, prod), q in monthly_qty.items():
-                if b != branch_id:
+            for (o, prod), q in monthly_qty.items():
+                if o != op_id:
                     continue
                 s.add(InputValue(concept=Concept.SALES_QTY, period=p.code, value=D(q),
-                                 business_unit_id="BU-01", branch_id=branch_id, product_id=prod))
+                                 operation_id=op_id, business_unit_id=op.business_unit_id,
+                                 branch_id=op.branch_id, product_id=prod))
         for head, bucket in fy.iter_buckets(Frequency.QUARTERLY):
-            if not any(cfg.is_active(branch, p) for p in bucket):
+            if not any(_op_active(cfg, op_id, p) for p in bucket):
                 continue
-            for (b, prod), q in quarterly_qty.items():
-                if b != branch_id:
+            for (o, prod), q in quarterly_qty.items():
+                if o != op_id:
                     continue
                 s.add(InputValue(concept=Concept.SALES_QTY, period=head.code, value=D(q),
-                                 business_unit_id="BU-01", branch_id=branch_id, product_id=prod))
+                                 operation_id=op_id, business_unit_id=op.business_unit_id,
+                                 branch_id=op.branch_id, product_id=prod))
 
-    # ---- Ventas BU-02 (por monto, en UYU) ----
-    amounts = {"P-101": 12_000_000, "P-102": 1_500_000, "P-199": 1_200_000}
-    for p in months:
-        for prod, amount in amounts.items():
-            s.add(InputValue(concept=Concept.SALES_AMOUNT, period=p.code, value=D(amount),
-                             currency="UYU", business_unit_id="BU-02", branch_id="BR-03",
-                             product_id=prod))
+    # ---- Ventas BU-02 (por monto, en UYU) en sus dos operaciones ----
+    amounts = {
+        "OP-03": {"P-101": 12_000_000, "P-102": 1_500_000, "P-199": 1_200_000},
+        "OP-04": {"P-101": 4_000_000, "P-102": 900_000, "P-199": 300_000},
+    }
+    for op_id, por_producto in amounts.items():
+        op = cfg.operation(op_id)
+        for p in months:
+            for prod, amount in por_producto.items():
+                s.add(InputValue(concept=Concept.SALES_AMOUNT, period=p.code, value=D(amount),
+                                 currency="UYU", operation_id=op_id,
+                                 business_unit_id=op.business_unit_id,
+                                 branch_id=op.branch_id, product_id=prod))
 
     # ---- Gastos: un importe por destino; 0 donde no corresponde ----
     alquiler = {"BR:BR-01": 8_000, "BR:BR-02": 0, "CC:CC-01": 2_500}   # Salto es propia
@@ -287,23 +323,19 @@ def build_inputs(cfg: Configuration) -> InputSet:
     s.add(_expense("CO", "EXP-04", months[0].code, D(48_000), "USD"))   # total, se reparte 60/40
 
     # ---- Nómina ----
-    s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(5),
-                     branch_id="BR-01", business_unit_id="BU-01", area_id="AR-VEN"))
-    s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(3),
-                     branch_id="BR-01", business_unit_id="BU-01", area_id="AR-TAL"))
-    s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(4),
-                     branch_id="BR-03", business_unit_id="BU-02", area_id="AR-VEN"))
+    for op_id, area_id, cant in (("OP-01", "AR-VEN", 5), ("OP-01", "AR-TAL", 3),
+                                 ("OP-03", "AR-VEN", 4), ("OP-04", "AR-VEN", 2)):
+        s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(cant),
+                         operation_id=op_id, area_id=area_id))
     s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(3),
                      support_unit_id="SU-01", area_id="AR-ADM"))
     s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,
-                     effective_date=date(2027, 2, 1), branch_id="BR-01",
-                     business_unit_id="BU-01", area_id="AR-VEN"))
+                     effective_date=date(2027, 2, 1), operation_id="OP-01", area_id="AR-VEN"))
     s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,
-                     effective_date=date(2027, 6, 1), branch_id="BR-02",
-                     business_unit_id="BU-01", area_id="AR-VEN"))
+                     effective_date=date(2027, 6, 1), operation_id="OP-02", area_id="AR-VEN"))
     s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(1),
                      change_type=ChangeType.TERMINATED, effective_date=date(2027, 9, 1),
-                     branch_id="BR-01", business_unit_id="BU-01", area_id="AR-TAL"))
+                     operation_id="OP-01", area_id="AR-TAL"))
 
     # ---- CAPEX ----
     s.add(InputValue(concept=Concept.CAPEX_AMOUNT, period="2027-06", value=D(250_000),
@@ -311,20 +343,20 @@ def build_inputs(cfg: Configuration) -> InputSet:
     s.add(InputValue(concept=Concept.CAPEX_AMOUNT, period="2027-03", value=D(60_000),
                      currency="USD", support_unit_id="SU-01", capex_category_id="CAT-02"))
 
-    # ---- Stock y compras (nivel sucursal, moneda USD) ----
-    opening = {("BR-01", "FAM-REP"): 900_000, ("BR-01", "FAM-ACC"): 100_000,
-               ("BR-02", "FAM-REP"): 250_000, ("BR-02", "FAM-ACC"): 40_000,
-               ("BR-03", "FAM-SVC"): 60_000}
-    for (branch_id, fam_id), amount in opening.items():
+    # ---- Stock y compras (nivel operación, moneda USD) ----
+    opening = {("OP-01", "FAM-REP"): 900_000, ("OP-01", "FAM-ACC"): 100_000,
+               ("OP-02", "FAM-REP"): 250_000, ("OP-02", "FAM-ACC"): 40_000,
+               ("OP-03", "FAM-SVC"): 60_000, ("OP-04", "FAM-SVC"): 20_000}
+    for (op_id, fam_id), amount in opening.items():
         s.add(InputValue(concept=Concept.OPENING_STOCK, value=D(amount), currency="USD",
-                         branch_id=branch_id, family_id=fam_id))
-    purchases = {("BR-01", "FAM-REP"): 620_000, ("BR-01", "FAM-ACC"): 74_000,
-                 ("BR-02", "FAM-REP"): 145_000, ("BR-02", "FAM-ACC"): 20_000,
-                 ("BR-03", "FAM-SVC"): 620_000}
+                         operation_id=op_id, family_id=fam_id))
+    purchases = {("OP-01", "FAM-REP"): 620_000, ("OP-01", "FAM-ACC"): 74_000,
+                 ("OP-02", "FAM-REP"): 145_000, ("OP-02", "FAM-ACC"): 20_000,
+                 ("OP-03", "FAM-SVC"): 620_000, ("OP-04", "FAM-SVC"): 200_000}
     for head, _ in fy.iter_buckets(Frequency.QUARTERLY):
-        for (branch_id, fam_id), amount in purchases.items():
+        for (op_id, fam_id), amount in purchases.items():
             s.add(InputValue(concept=Concept.PURCHASES, period=head.code, value=D(amount),
-                             currency="USD", branch_id=branch_id, family_id=fam_id))
+                             currency="USD", operation_id=op_id, family_id=fam_id))
 
     # ---- Balance ----
     opening_balance = {"BI-CASH": 300_000, "BI-AR": 500_000, "BI-STK": 1_350_000,
@@ -351,6 +383,8 @@ def users() -> list[User]:
         User(id="u.coo", name="Diego (COO)", roles={Role.COO, Role.REVIEWER}),
         User(id="u.admin", name="Ana (Administración)", roles={Role.ADMIN_AREA}),
         User(id="u.payroll", name="Sofía (Nómina)", roles={Role.PAYROLL_AREA}),
+        # El gerente de sucursal tiene alcance sobre la sucursal entera: eso le
+        # alcanza a todas las operaciones que viven ahí, sean de la unidad que sean.
         User(id="u.br01", name="Martín (Gerente Montevideo)", roles={Role.UNIT_MANAGER},
              scopes={"BR:BR-01"}),
         User(id="u.br02", name="Paula (Gerente Salto)", roles={Role.UNIT_MANAGER},

@@ -16,7 +16,7 @@ from enum import Enum
 from typing import Optional
 
 from .config import AllocationMode, Configuration, BalanceSection, BalanceSource, ExpenseTargetType
-from .engine import FY, scope_br, scope_bu, scope_co, scope_su
+from .engine import FY, scope_br, scope_bu, scope_co, scope_op, scope_su
 from .graph import nk
 from .inputs import Concept, InputSet
 from .money import FXTable
@@ -108,7 +108,7 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
 
         if iv.concept in (Concept.SALES_QTY, Concept.SALES_AMOUNT):
             try:
-                unit = cfg.branch_owner(iv.branch_id or "")
+                unit = cfg.operation_unit(iv.operation_id or "")
                 product = unit.product(iv.product_id or "")
             except Exception as exc:
                 out.append(Finding("INVALID_PRODUCT", f"{tag}: {exc}", Severity.BLOCKING, tag))
@@ -176,19 +176,23 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                for iv in inputs.values}
 
     if "SALES" in required:
-        for unit, b in cfg.all_branches():
+        for op in cfg.operations:
+            unit = cfg.unit(op.business_unit_id)
+            branch = cfg.branch(op.branch_id)
             for product in unit.products:
                 concept = (Concept.SALES_QTY if product.sales_mode.value == "UNIT_BASED"
                            else Concept.SALES_AMOUNT)
                 for head, bucket in fy.iter_buckets(product.sales_frequency):
-                    if not any(cfg.is_active(b, p) for p in bucket):
+                    if not any(cfg.is_active(op, p) and cfg.is_active(unit, p)
+                               and cfg.is_active(branch, p) for p in bucket):
                         continue
-                    key = (concept, scope_br(b.id), product.id, None, None, head.code)
+                    key = (concept, scope_op(op.id), product.id, None, None, head.code)
                     if key not in present:
                         out.append(Finding(
                             "MISSING_REQUIRED_INPUT",
-                            f"Ventas: falta {product.code} en {b.name} para {head.code}",
-                            Severity.BLOCKING, scope_br(b.id)))
+                            f"Ventas: falta {product.code} en "
+                            f"{cfg.operation_label(op.id)} para {head.code}",
+                            Severity.BLOCKING, scope_op(op.id)))
 
     if "EXPENSES" in required:
         # En PER_TARGET hay que cargar un importe por cada destino — 0 si no
@@ -209,20 +213,20 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                             Severity.BLOCKING, f"EXP:{ed.id}"))
 
     if "OPENING_STOCK" in required and cfg.inventory.enabled:
-        from .engine import BudgetEngine  # noqa: F401  (sólo para tipar mentalmente)
         levels = {
             "COMPANY": [scope_co()],
             "BUSINESS_UNIT": [scope_bu(u.id) for u in cfg.business_units],
-            "BRANCH": [scope_br(b.id) for _, b in cfg.all_branches()],
+            "OPERATION": [scope_op(o.id) for o in cfg.operations],
         }[cfg.inventory.level.value]
         for scope in levels:
             fams = _families_for_scope(cfg, scope)
             for fam in fams:
                 if not any(iv.concept is Concept.OPENING_STOCK and iv.scope_key == scope
                            and iv.family_id == fam for iv in inputs.values):
-                    out.append(Finding("MISSING_REQUIRED_INPUT",
-                                       f"Stock inicial: falta familia {fam} en {scope}",
-                                       Severity.BLOCKING, scope))
+                    out.append(Finding(
+                        "MISSING_REQUIRED_INPUT",
+                        f"Stock inicial: falta familia {fam} en {cfg.scope_label(scope)}",
+                        Severity.BLOCKING, scope))
 
     if "BALANCE" in required and cfg.balance.enabled:
         for item in cfg.balance.items:
@@ -242,8 +246,11 @@ def _families_for_scope(cfg: Configuration, scope: str) -> list[str]:
     kind, _id = scope.split(":", 1)
     if kind == "BU":
         return sorted({f.id for f in cfg.unit(_id).families})
-    unit = cfg.branch_owner(_id)
-    return sorted({f.id for f in unit.families})
+    if kind == "OP":
+        return sorted({f.id for f in cfg.operation_unit(_id).families})
+    if kind == "BR":
+        return sorted({f.id for u in cfg.branch_units(_id) for f in u.families})
+    return []
 
 
 # ==========================================================================
@@ -279,7 +286,8 @@ def evaluate_objectives(cfg: Configuration, values: dict, period_code: str = FY)
     scopes = (
         [("empresa", scope_co())]
         + [(u.name, scope_bu(u.id)) for u in cfg.business_units]
-        + [(b.name, scope_br(b.id)) for _, b in cfg.all_branches()]
+        + [(b.name, scope_br(b.id)) for b in cfg.branches]
+        + [(cfg.operation_label(o.id), scope_op(o.id)) for o in cfg.operations]
     )
     for sel in cfg.ratios:
         if not sel.objective:
@@ -320,13 +328,20 @@ def collect_assumptions(cfg: Configuration) -> list[str]:
             "Es el caso de los intangibles.")
     if any(t.distribute_to_branches for e in cfg.expenses for t in e.targets):
         out.append(
-            "Los gastos de unidad distribuidos a sucursales usan como driver las ventas "
-            "anuales de cada sucursal; una sucursal sin ventas no recibe asignación."
+            "Los gastos de una unidad o de una sucursal marcados para distribuir se reparten "
+            "entre sus operaciones usando como driver las ventas anuales de cada una; "
+            "una operación sin ventas no recibe asignación."
         )
-    if any(t.corporate for e in cfg.expenses for t in e.targets):
+    if cfg.expenses or cfg.support_units:
         out.append(
             "Los gastos de empresa y de las áreas de soporte se muestran asignados a las "
-            "unidades por debajo del EBITDA propio; no forman parte del EBITDA de la unidad."
+            "operaciones por debajo del EBITDA propio; no forman parte de ese EBITDA."
+        )
+    if cfg.operations:
+        out.append(
+            "La unidad mínima del presupuesto es la operación (unidad de negocio x sucursal). "
+            "Unidades y sucursales son dos agrupaciones distintas de las mismas operaciones, "
+            "por eso sus resultados no se suman entre sí."
         )
     if not cfg.inventory.enabled:
         out.append("Stock: no configurado. Los ratios de inventario no se calculan.")

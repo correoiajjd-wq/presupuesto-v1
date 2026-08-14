@@ -94,17 +94,24 @@ Las que más costó dejar bien:
 - **Aumentos salariales por fecha de ingreso.** Quien entra en febrero cobra el aumento de
   marzo y el de agosto; quien entra en abril, sólo el de agosto. Se modela por cohortes de
   ingreso, y las bajas consumen las cohortes más antiguas primero.
-- **Gastos corporativos.** Se asignan a unidades y sucursales proporcionalmente a las ventas
+- **La operación es la unidad mínima.** Una unidad de negocio puede operar en varias
+  sucursales y una sucursal puede alojar varias unidades: la relación es n a n. Cada
+  combinación es una **operación** con su propio centro de costo, y es ahí donde se cargan
+  ventas y dotación y donde se imputan los gastos propios. Unidades y sucursales son dos
+  agrupaciones distintas de las mismas operaciones, así que sus resultados **no se suman
+  entre sí**: sumar unidad + sucursal contaría dos veces la misma operación.
+- **Gastos corporativos.** Se asignan a las operaciones proporcionalmente a las ventas
   **anuales** (no mensuales: con ventas estacionales el driver mensual da asignaciones
   erráticas). La asignación es presentacional: se muestra debajo del EBITDA propio, y
-  `Σ(resultado después de asignación de cada unidad) = EBITDA de la empresa`. Hay un test
-  que verifica esa identidad.
+  `Σ(resultado después de asignación de cada operación) = EBITDA de la empresa`. Hay un test
+  que verifica esa identidad. A una unidad se le asigna lo corporativo y lo de las sucursales
+  donde opera; a una sucursal, lo corporativo y lo de las unidades que operan ahí.
 - **Un gasto, varios destinos.** Internet existe en todas las sucursales y en administración;
   el alquiler sólo en las sucursales que no son propias. Un gasto tiene una lista de destinos
   y dos modos de carga: un importe por cada destino (donde no corresponde se carga 0) o un
   total que se reparte con porcentajes fijos.
-- **La comisión es del producto.** Dentro de una misma sucursal unos productos comisionan,
-  otros comisionan distinto y otros no. La comisión de una sucursal es la suma de las ventas
+- **La comisión es del producto.** Dentro de una misma operación unos productos comisionan,
+  otros comisionan distinto y otros no. La comisión de una operación es la suma de las ventas
   de cada producto por su propia tasa, y va al costo de nómina.
 - **La fórmula de margen incluye "sin costo".** Para intangibles, donde el precio de venta es
   todo margen: el costo es 0 y el margen 100%. El motor trabaja con la proporción de costo de
@@ -149,7 +156,7 @@ y **no** bloquea la aprobación.
 
 Los ratios de inventario se anualizan por días del período, para que un mes sea comparable
 con el ejercicio. Los de balance existen sólo a nivel empresa y sólo anuales: el balance
-no baja a sucursal en V1.
+no baja a operación en V1.
 
 ---
 
@@ -157,16 +164,18 @@ no baja a sucursal en V1.
 
 ACME Distribución S.A., ejercicio 2027, presentación USD:
 
-- **Repuestos** (venta por unidades) con Montevideo y **Salto, que abre en junio**
-- **Servicios** (venta por monto, en UYU, con comisión del 2% sobre ventas)
-- Administración central como unidad de soporte con centro de costo
-- Los cinco tipos de gasto: propio de sucursal, de unidad distribuido a sucursales,
+- **Repuestos** (venta por unidades) operando en Montevideo y en **Salto, que abre en junio**
+- **Servicios** (venta por monto, en UYU, con comisión por producto) operando en Centro
+  **y también en Montevideo**: la misma sucursal aloja dos unidades, cada una con su
+  centro de costo. La relación n a n queda ejercitada en las dos direcciones.
+- Administración central como área de soporte con su centro de costo
+- Los cinco tipos de gasto: propio de sucursal, de unidad distribuido a sus operaciones,
   de centro de costo, distribuido 60/40 por porcentaje, y corporativo de empresa
 - Nómina con dotación inicial, altas, una baja, dos aumentos y cargas del 17%
-- Stock por familia a nivel sucursal, CAPEX, balance inicial y proyectado
+- Stock por familia a nivel operación, CAPEX, balance inicial y proyectado
 
-Resultado: ventas 8.550.000, EBITDA 1.611.884 (18,9%), 0 validaciones bloqueantes,
-5 alertas informativas. El reporte HTML (`reporte.html`) muestra todo eso.
+Resultado: ventas 10.915.200, EBITDA 2.757.576 (25,3%), 0 validaciones bloqueantes.
+El reporte HTML (`reporte.html`) muestra todo eso.
 
 ---
 
@@ -200,10 +209,12 @@ sesiones y entre varias personas, y cada paso dice de quién es:
 1. **Datos generales** — empresa, ejercicio (cualquier fecha de inicio y fin), monedas
    habilitadas y tipos de cambio. El TC se guarda día por día; para no cargar 365 valores
    se pide el estimado de inicio y el de cierre, y el sistema interpola.
-2. **Estructura** — primero se dan de alta las **sucursales** como catálogo de la empresa,
-   después las unidades de negocio, y recién ahí se asocia cada sucursal a su unidad
-   eligiendo ambas de un selector. Así el nombre de una sucursal existe una sola vez y no
-   se duplica por tipeo. Una sucursal sin unidad no genera cargas y no deja cerrar.
+2. **Estructura** — sucursales y unidades de negocio se dan de alta por separado, cada una
+   una sola vez; después se crea cada **operación** eligiendo unidad y sucursal de sendos
+   selectores y dándole su **centro de costo**, que es donde se van a registrar sus gastos.
+   Una unidad puede operar en varias sucursales y una sucursal alojar varias unidades. Una
+   sucursal donde no opera nadie, o una unidad que no opera en ningún lado, no genera cargas
+   y no deja cerrar.
 3. **Productos y familias** — lo define el **COO**. La modalidad de venta, la fórmula de
    margen y la comisión son **de cada producto**, no de la unidad: la misma unidad puede
    vender mercadería por unidades y servicios por monto, y cada producto comisiona distinto.
@@ -231,10 +242,10 @@ en borrador redirige al wizard.
 | **Ingreso** | Elegís rol: CFO, COO, gerente de sucursal, administración, nómina, finanzas. Cada uno ve algo distinto. |
 | **Configurar** | El wizard de nueve pasos. Los pasos del COO no los puede editar otro rol, y viceversa. |
 | **Panel del CFO** | Progreso de carga y aprobación, checklist de configuración, qué falta para poder aprobar, alertas. |
-| **Mis tareas** | Un gerente sólo ve sus tareas y sus sucursales. Si intenta entrar a otra, el sistema lo frena. |
+| **Mis tareas** | Un gerente sólo ve sus tareas. El alcance sobre una sucursal le alcanza a todas las operaciones que viven ahí; si intenta entrar a otra, el sistema lo frena. |
 | **Carga** | El formulario se genera desde la configuración: sólo tus productos, tus períodos, tu moneda. El precio y el margen se muestran pero no se editan. Guardás borrador o enviás a revisión. |
-| **Carga masiva** | Descargás la planilla Excel de tu sucursal, la llenás, la subís. Si tiene un error, se rechaza entera y te muestra fila, columna, valor, error y corrección esperada. |
-| **P&L** | Consolidado, por unidad y por sucursal, anual o mes a mes, con los corporativos separados debajo del EBITDA. |
+| **Carga masiva** | Descargás la planilla Excel de tu operación, la llenás, la subís. Si tiene un error, se rechaza entera y te muestra fila, columna, valor, error y corrección esperada. |
+| **P&L** | Consolidado, por unidad, por sucursal y por operación, anual o mes a mes, con los corporativos separados debajo del EBITDA. |
 | **Ratios** | Los 23 del catálogo contra sus objetivos, por ámbito. |
 | **Escenarios** | Cargás variaciones sobre inputs y ves el impacto contra la base. La base no cambia. |
 | **Explicar** | De dónde sale un número: el árbol de dependencias con valores y fórmulas. |
@@ -248,7 +259,8 @@ en borrador redirige al wizard.
   sucursal el sistema responde `UNAUTHORIZED_SCOPE`.
 - Intentá cerrar la configuración con una moneda habilitada sin tipo de cambio: no te deja.
 - Cargá dos productos "Otros" en la misma unidad, o una distribución de gasto que sume 90%.
-- Entrá como **Martín (gerente Montevideo)** y fijate que no existe la sucursal Salto para él.
+- Entrá como **Martín (gerente Montevideo)** y fijate que ve las dos operaciones de su
+  sucursal —Repuestos y Servicios— y ninguna de Salto.
 - En **Ventas**, dejá una celda vacía y guardá: pasa. Ahora bajá la planilla Excel, dejá una
   celda vacía y subila: la rechaza entera, porque en carga masiva vacío es error.
 - Cargá un producto trimestral en un período que no sea cabecera de trimestre: `INVALID_FREQUENCY`,

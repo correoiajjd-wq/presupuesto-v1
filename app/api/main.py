@@ -147,13 +147,20 @@ def create_app(service: BudgetService) -> Flask:
     def load_sales(version_id):
         _, v = find_version(version_id)
         body = request.get_json(force=True)
-        unit = v.configuration.unit(body["business_unit_id"])
+        cfg = v.configuration
+        # La venta se carga en la operación: la combinación unidad x sucursal.
+        op = (cfg.operation(body["operation_id"]) if body.get("operation_id")
+              else cfg.operation_for(body["business_unit_id"], body["branch_id"]))
+        if op is None:
+            raise BudgetError("INVALID_OPERATION",
+                              "Esa unidad de negocio no opera en esa sucursal.")
         concept = Concept.SALES_QTY if "quantity" in body else Concept.SALES_AMOUNT
         iv = InputValue(
             concept=concept, period=body["period"],
             value=Decimal(str(body.get("quantity", body.get("amount", 0)))),
-            currency=body.get("currency"), business_unit_id=unit.id,
-            branch_id=body["branch_id"], product_id=body["product_id"],
+            currency=body.get("currency"), operation_id=op.id,
+            business_unit_id=op.business_unit_id, branch_id=op.branch_id,
+            product_id=body["product_id"],
         )
         service.submit_input(actor(), v, iv, "budget.sales.load")
         return jsonify({"status": "ACCEPTED", "identity": iv.identity()}), 201
@@ -178,9 +185,9 @@ def create_app(service: BudgetService) -> Flask:
     def input_template(version_id):
         actor()
         _, v = find_version(version_id)
-        branch_id = request.args["branch_id"]
-        data = sales_template(v, branch_id)
-        return send_file(BytesIO(data), download_name=f"ventas_{branch_id}.xlsx",
+        operation_id = request.args["operation_id"]
+        data = sales_template(v, operation_id)
+        return send_file(BytesIO(data), download_name=f"ventas_{operation_id}.xlsx",
                          as_attachment=True,
                          mimetype="application/vnd.openxmlformats-officedocument."
                                   "spreadsheetml.sheet")
@@ -189,9 +196,9 @@ def create_app(service: BudgetService) -> Flask:
     def create_import(version_id):
         user = actor()
         _, v = find_version(version_id)
-        branch_id = request.args["branch_id"]
+        operation_id = request.args["operation_id"]
         file = request.files["file"]
-        result, parsed = parse_sales_import(v, file.read(), branch_id, user)
+        result, parsed = parse_sales_import(v, file.read(), operation_id, user)
         if result.status == "REJECTED":
             return jsonify({"error": {"code": "IMPORT_VALIDATION_FAILED",
                                       "message": "La planilla fue rechazada por completo. "
@@ -328,7 +335,8 @@ def create_app(service: BudgetService) -> Flask:
                           concept=a["concept"], variation_type=a.get("variation_type", "PERCENTAGE"),
                           variation=Decimal(str(a["variation"])),
                           business_unit_id=a.get("business_unit_id"),
-                          branch_id=a.get("branch_id"))
+                          branch_id=a.get("branch_id"),
+                          operation_id=a.get("operation_id"))
                           for a in body.get("adjustments", [])])
         v.scenarios[sc.id] = sc
         return jsonify({"scenario_id": sc.id, "name": sc.name}), 201

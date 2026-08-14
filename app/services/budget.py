@@ -150,10 +150,22 @@ class User:
     roles: set[Role]
     scopes: set[str] = field(default_factory=set)  # vacío = transversal (CFO)
 
-    def has_scope(self, scope_key: str) -> bool:
+    def has_scope(self, scope_key: str, cfg: Optional[Configuration] = None) -> bool:
+        """Tener alcance sobre algo alcanza también a lo que ese algo contiene.
+
+        Quien tiene la sucursal tiene las operaciones de esa sucursal; quien
+        tiene la unidad, las de la unidad. Como una operación pertenece a la vez
+        a una unidad y a una sucursal, ambos caminos son válidos.
+        """
         if not self.scopes:
             return True
-        return scope_key in self.scopes or scope_key == "CO" and Role.CFO in self.roles
+        if scope_key in self.scopes:
+            return True
+        if scope_key == "CO" and Role.CFO in self.roles:
+            return True
+        if cfg is not None and self.scopes & cfg.scope_ancestors(scope_key):
+            return True
+        return False
 
 
 class AuthorizationProvider:
@@ -182,10 +194,11 @@ class AuthorizationProvider:
             out |= self.CAPABILITIES.get(r, set())
         return out
 
-    def check(self, user: User, capability: str, scope_key: str = "CO") -> None:
+    def check(self, user: User, capability: str, scope_key: str = "CO",
+              cfg: Optional[Configuration] = None) -> None:
         if capability not in self.capabilities(user):
             raise BudgetError("UNAUTHORIZED", f"{user.name} no tiene la capacidad {capability}")
-        if not user.has_scope(scope_key):
+        if not user.has_scope(scope_key, cfg):
             raise BudgetError(
                 "UNAUTHORIZED_SCOPE", f"{user.name} no tiene alcance sobre {scope_key}"
             )
@@ -271,6 +284,7 @@ class ScenarioAdjustment:
     variation: Decimal
     business_unit_id: Optional[str] = None
     branch_id: Optional[str] = None
+    operation_id: Optional[str] = None
 
 
 @dataclass
@@ -390,10 +404,13 @@ class BudgetService:
             )
             version.tasks[task.id] = task
 
-        for u in cfg.business_units:
-            for b in cfg.unit_branches(u.id):
-                add("SALES", f"BR:{b.id}", f"Ventas — {u.name} / {b.name}")
-                add("PAYROLL_HEADCOUNT", f"BR:{b.id}", f"Dotación — {u.name} / {b.name}")
+        # La carga vive en la operación: la combinación unidad x sucursal.
+        for o in cfg.operations:
+            label = cfg.operation_label(o.id)
+            add("SALES", f"OP:{o.id}", f"Ventas — {label}")
+            add("PAYROLL_HEADCOUNT", f"OP:{o.id}", f"Dotación — {label}")
+        for su in cfg.support_units:
+            add("PAYROLL_HEADCOUNT", f"SU:{su.id}", f"Dotación — {su.name}")
         if cfg.expenses:
             add("EXPENSES", "CO", "Gastos — todos los conceptos configurados")
         if cfg.capex.enabled:
@@ -408,14 +425,14 @@ class BudgetService:
         for t in version.tasks.values():
             if t.loader_role in user.roles or t.reviewer_role in user.roles or \
                     t.approver_role in user.roles:
-                if user.has_scope(t.scope_key):
+                if user.has_scope(t.scope_key, version.configuration):
                     out.append(t)
         return out
 
     def _transition(self, actor: str, version: BudgetVersion, task: Task,
                     new: TaskStatus, capability: str, comment: Optional[str] = None) -> Task:
         user = self.user(actor)
-        self.auth.check(user, capability, task.scope_key)
+        self.auth.check(user, capability, task.scope_key, version.configuration)
         if not task.can_transition(new):
             raise BudgetError(
                 "WORKFLOW_INVALID_TRANSITION",
@@ -466,7 +483,7 @@ class BudgetService:
     def submit_input(self, actor: str, version: BudgetVersion, iv: InputValue,
                      capability: str = "budget.expense.load") -> InputValue:
         user = self.user(actor)
-        self.auth.check(user, capability, iv.scope_key)
+        self.auth.check(user, capability, iv.scope_key, version.configuration)
         version.assert_mutable()
         if version.configuration.status is not ConfigStatus.LOCKED:
             raise BudgetError("CONFIGURATION_NOT_CLOSED",

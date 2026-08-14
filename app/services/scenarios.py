@@ -28,6 +28,10 @@ CONCEPT_TARGETS: dict[str, tuple[Concept, ...]] = {
 
 
 def _in_scope(iv, adj: ScenarioAdjustment) -> bool:
+    """Un ajuste por sucursal o por unidad alcanza a las operaciones de esa
+    sucursal o de esa unidad; el input ya trae ambos ids resueltos."""
+    if adj.operation_id:
+        return iv.operation_id == adj.operation_id
     if adj.branch_id:
         return iv.branch_id == adj.branch_id
     if adj.business_unit_id:
@@ -41,11 +45,17 @@ def apply_overlay(cfg: Configuration, inputs: InputSet,
     new_cfg = cfg.model_copy(deep=True)
     new_inputs = inputs.model_copy(deep=True)
 
-    # los inputs de ventas no siempre traen business_unit_id resuelto por sucursal
-    branch_to_unit = {b.id: u.id for u, b in cfg.all_branches()}
+    # Los inputs cargados en una operación llevan sólo operation_id: se
+    # completan la unidad y la sucursal para poder filtrar por cualquiera.
     for iv in new_inputs.values:
-        if iv.branch_id and not iv.business_unit_id:
-            iv.business_unit_id = branch_to_unit.get(iv.branch_id)
+        if not iv.operation_id:
+            continue
+        try:
+            op = cfg.operation(iv.operation_id)
+        except Exception:
+            continue
+        iv.business_unit_id = iv.business_unit_id or op.business_unit_id
+        iv.branch_id = iv.branch_id or op.branch_id
 
     for adj in adjustments:
         if adj.concept not in CONCEPT_TARGETS:

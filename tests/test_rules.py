@@ -13,7 +13,9 @@ from app.domain.config import (
     AllocationMode, ConfigStatus, ConfigurationError, ExpenseDefinition, ExpenseTarget,
     ExpenseTargetType, MarginFormula, SalesMode,
 )
-from app.domain.engine import FY, BudgetEngine, scope_br, scope_bu, scope_co, scope_stock
+from app.domain.engine import (
+    FY, BudgetEngine, scope_br, scope_bu, scope_co, scope_op, scope_stock,
+)
 from app.domain.graph import nk
 from app.domain.inputs import Concept, InputSet, InputValue
 from app.domain.money import FXTable, Money
@@ -143,26 +145,26 @@ class TestSalesAndMargin(unittest.TestCase):
 
     def test_modalidad_unidades(self):
         """Doc 02 §10: el gerente carga cantidad; el sistema calcula ventas y costo."""
-        v = val(self.values, "SALES", "BR:BR-01#P:P-001", "2027-01")
+        v = val(self.values, "SALES", "OP:OP-01#P:P-001", "2027-01")
         self.assertEqual(v, D(2500) * D(100))
-        c = val(self.values, "COGS", "BR:BR-01#P:P-001", "2027-01")
+        c = val(self.values, "COGS", "OP:OP-01#P:P-001", "2027-01")
         self.assertEqual(c, v * (Decimal(1) - D("0.30")))
 
     def test_modalidad_monto_convierte_moneda(self):
         """BU-02 carga en UYU; el sistema presenta en USD."""
-        v = val(self.values, "SALES", "BR:BR-03#P:P-101", "2027-01")
+        v = val(self.values, "SALES", "OP:OP-03#P:P-101", "2027-01")
         self.assertEqual(v, D(12_000_000) * D("0.025"))
 
     def test_margen_markup_sobre_costo(self):
         """Doc 02 §11: la fórmula de margen es configuración, y es del producto."""
-        sales = val(self.values, "SALES", "BR:BR-01#P:P-002", "2027-01")
-        cogs = val(self.values, "COGS", "BR:BR-01#P:P-002", "2027-01")
+        sales = val(self.values, "SALES", "OP:OP-01#P:P-002", "2027-01")
+        cogs = val(self.values, "COGS", "OP:OP-01#P:P-002", "2027-01")
         self.assertAlmostEqual(float(cogs), float(sales / (Decimal(1) + D("0.35"))), places=6)
 
     def test_producto_sin_costo(self):
         """Un intangible: el precio de venta es todo margen."""
-        sales = val(self.values, "SALES", "BR:BR-03#P:P-102", "2027-01")
-        cogs = val(self.values, "COGS", "BR:BR-03#P:P-102", "2027-01")
+        sales = val(self.values, "SALES", "OP:OP-03#P:P-102", "2027-01")
+        cogs = val(self.values, "COGS", "OP:OP-03#P:P-102", "2027-01")
         self.assertGreater(sales, 0)
         self.assertEqual(cogs, D(0))
 
@@ -178,7 +180,7 @@ class TestSalesAndMargin(unittest.TestCase):
 
     def test_frecuencia_trimestral_se_distribuye(self):
         """Doc 02 §13: si se carga en frecuencia mayor, se distribuye equitativamente."""
-        q1 = [val(self.values, "SALES", "BR:BR-01#P:P-002", f"2027-0{m}") for m in (1, 2, 3)]
+        q1 = [val(self.values, "SALES", "OP:OP-01#P:P-002", f"2027-0{m}") for m in (1, 2, 3)]
         # partes iguales salvo el ajuste de redondeo, que va al último mes
         self.assertLessEqual(max(q1) - min(q1), D("0.01") * D(250))
         self.assertEqual(sum(q1), D(400) * D(250))   # no se pierde ni se inventa valor
@@ -191,8 +193,8 @@ class TestSalesAndMargin(unittest.TestCase):
 
     def test_trimestre_parcial_no_se_reparte_a_meses_cerrados(self):
         """El trimestre abr-jun de una sucursal que abre en junio va entero a junio."""
-        abr = val(self.values, "SALES", "BR:BR-02#P:P-002", "2027-04")
-        jun = val(self.values, "SALES", "BR:BR-02#P:P-002", "2027-06")
+        abr = val(self.values, "SALES", "OP:OP-02#P:P-002", "2027-04")
+        jun = val(self.values, "SALES", "OP:OP-02#P:P-002", "2027-06")
         self.assertEqual(abr, D(0))
         self.assertEqual(jun, D(150) * D(250))
 
@@ -219,16 +221,20 @@ class TestPayroll(unittest.TestCase):
 
     def test_dotacion_altas_y_bajas(self):
         """Doc 02 §54: dotación inicial + altas - bajas = dotación final."""
-        ene = val(self.values, "HEADCOUNT", scope_br("BR-01"), "2027-01")
-        feb = val(self.values, "HEADCOUNT", scope_br("BR-01"), "2027-02")
-        sep = val(self.values, "HEADCOUNT", scope_br("BR-01"), "2027-09")
+        ene = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-01")
+        feb = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-02")
+        sep = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-09")
         self.assertEqual(ene, D(8))          # 5 ventas + 3 taller
         self.assertEqual(feb, D(10))         # +2 altas
         self.assertEqual(sep, D(9))          # -1 baja
+        # La sucursal Montevideo aloja además la operación de Servicios: su
+        # dotación es la suma de las dos, no la de una sola.
+        self.assertEqual(val(self.values, "HEADCOUNT", scope_br("BR-01"), "2027-01"),
+                         ene + val(self.values, "HEADCOUNT", scope_op("OP-04"), "2027-01"))
 
     def test_costo_laboral_incluye_cargas(self):
         """Doc 01 §18: los conceptos porcentuales se aplican automáticamente."""
-        enero = val(self.values, "PAYROLL_BASE", scope_br("BR-01"), "2027-01")
+        enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
         esperado = (D(5) * D(2500) + D(3) * D(1800)) * D("1.17")
         self.assertEqual(enero, esperado)
 
@@ -242,11 +248,11 @@ class TestPayroll(unittest.TestCase):
         esperado = D(0)
         con_comision = 0
         for prod in unidad.products:
-            ventas = val(self.values, "SALES", f"BR:BR-03#P:{prod.id}", "2027-01")
+            ventas = val(self.values, "SALES", f"OP:OP-03#P:{prod.id}", "2027-01")
             if prod.commission_rate:
                 esperado += ventas * prod.commission_rate
                 con_comision += 1
-        comision = val(self.values, "COMMISSION", scope_br("BR-03"), "2027-01")
+        comision = val(self.values, "COMMISSION", scope_op("OP-03"), "2027-01")
         self.assertEqual(comision, esperado)
         self.assertGreater(con_comision, 1)          # más de una tasa distinta
         self.assertLess(con_comision, len(unidad.products))   # y alguno sin comisión
@@ -254,16 +260,16 @@ class TestPayroll(unittest.TestCase):
     def test_un_producto_sin_comision_no_aporta(self):
         otros = self.cfg.unit("BU-02").product("P-199")
         self.assertIsNone(otros.commission_rate)
-        ventas_otros = val(self.values, "SALES", "BR:BR-03#P:P-199", "2027-01")
+        ventas_otros = val(self.values, "SALES", "OP:OP-03#P:P-199", "2027-01")
         self.assertGreater(ventas_otros, 0)
         # la comisión total no incluye esas ventas
-        total_ventas = val(self.values, "SALES", scope_br("BR-03"), "2027-01")
-        comision = val(self.values, "COMMISSION", scope_br("BR-03"), "2027-01")
+        total_ventas = val(self.values, "SALES", scope_op("OP-03"), "2027-01")
+        comision = val(self.values, "COMMISSION", scope_op("OP-03"), "2027-01")
         self.assertLess(comision, total_ventas * D("0.05"))
 
     def test_la_comision_no_aplica_a_una_unidad_sin_tasas(self):
         """Repuestos no tiene productos con comisión: no genera comisión."""
-        self.assertEqual(val(self.values, "COMMISSION", scope_br("BR-01"), "2027-01"), D(0))
+        self.assertEqual(val(self.values, "COMMISSION", scope_op("OP-01"), "2027-01"), D(0))
 
     def test_nomina_de_soporte_no_esta_en_ebitda_de_la_unidad(self):
         pay_bu = sum(val(self.values, "PAYROLL", scope_bu(u.id)) for u in self.cfg.business_units)
@@ -302,28 +308,37 @@ class TestExpenses(unittest.TestCase):
                            D(0))
 
     def test_gasto_de_unidad_se_distribuye_proporcional_a_ventas(self):
-        """Doc 02 §22: proporcional al volumen total de ventas."""
-        s1 = val(self.values, "SALES", scope_br("BR-01"))
-        s2 = val(self.values, "SALES", scope_br("BR-02"))
-        e1 = val(self.values, "EXPENSES", scope_br("BR-01"))
-        e2 = val(self.values, "EXPENSES", scope_br("BR-02"))
-        # cada sucursal tiene además sus gastos propios; comparamos la parte de marketing
+        """Doc 02 §22: proporcional al volumen total de ventas.
+
+        El marketing de Repuestos se reparte entre las operaciones de Repuestos
+        —Montevideo y Salto— y no toca a la operación de Servicios que vive en
+        la misma sucursal de Montevideo.
+        """
+        s1 = val(self.values, "SALES", scope_op("OP-01"))
+        s2 = val(self.values, "SALES", scope_op("OP-02"))
+        e1 = val(self.values, "EXPENSES", scope_op("OP-01"))
+        e2 = val(self.values, "EXPENSES", scope_op("OP-02"))
         marketing = D(120_000)
-        propios_1 = D(8_000 + 600) * 12          # alquiler + internet
-        propios_2 = D(0 + 350) * 12
-        self.assertAlmostEqual(float(e1 - propios_1),
-                               float(marketing * s1 / (s1 + s2)), places=2)
-        self.assertAlmostEqual(float(e2 - propios_2),
-                               float(marketing * s2 / (s1 + s2)), places=2)
+        self.assertAlmostEqual(float(e1), float(marketing * s1 / (s1 + s2)), places=2)
+        self.assertAlmostEqual(float(e2), float(marketing * s2 / (s1 + s2)), places=2)
         self.assertGreater(e1, e2)
+        # Servicios Montevideo no recibe nada del marketing de Repuestos
+        self.assertEqual(val(self.values, "EXPENSES", scope_op("OP-04")), D(0))
 
     def test_corporativos_se_muestran_debajo_del_ebitda(self):
         """Doc 02 §53: distinguir resultado propio del impacto corporativo."""
         eb_bu = val(self.values, "EBITDA", scope_bu("BU-01"))
         after = val(self.values, "RESULT_AFTER_ALLOCATION", scope_bu("BU-01"))
         alloc = val(self.values, "ALLOCATED_EXPENSES", scope_bu("BU-01"))
-        self.assertEqual(after, eb_bu - alloc)
+        self.assertAlmostEqual(float(after), float(eb_bu - alloc), places=4)
         self.assertGreater(alloc, D(0))
+        # Lo que se le asigna a la unidad es lo corporativo y lo de las sucursales
+        # donde opera; lo suyo propio ya está dentro de su EBITDA.
+        por_operacion = sum(
+            val(self.values, m, scope_op(o.id))
+            for o in self.cfg.unit_operations("BU-01")
+            for m in ("ALLOC_FROM_COMPANY", "ALLOC_FROM_BRANCH"))
+        self.assertAlmostEqual(float(alloc), float(por_operacion), places=4)
 
     def test_la_asignacion_corporativa_cierra_contra_el_ebitda_de_la_empresa(self):
         suma = sum(val(self.values, "RESULT_AFTER_ALLOCATION", scope_bu(u.id))
@@ -339,7 +354,7 @@ class TestInventory(unittest.TestCase):
 
     def test_stock_final_es_calculado(self):
         """Doc 02 §27: stock anterior + compras - costo de venta."""
-        sc = scope_stock(scope_br("BR-01"), "FAM-REP")
+        sc = scope_stock(scope_op("OP-01"), "FAM-REP")
         o = val(self.values, "OPENING_STOCK", sc, "2027-05")
         p = val(self.values, "PURCHASES", sc, "2027-05")
         c = val(self.values, "COGS_FAMILY", sc, "2027-05")
@@ -347,18 +362,18 @@ class TestInventory(unittest.TestCase):
         self.assertEqual(f, o + p - c)
 
     def test_stock_encadena_periodos(self):
-        sc = scope_stock(scope_br("BR-01"), "FAM-REP")
+        sc = scope_stock(scope_op("OP-01"), "FAM-REP")
         cierre_abril = val(self.values, "CLOSING_STOCK", sc, "2027-04")
         inicio_mayo = val(self.values, "OPENING_STOCK", sc, "2027-05")
         self.assertEqual(cierre_abril, inicio_mayo)
 
     def test_cogs_por_familia_consolida_productos(self):
         """Doc 02 §27: productos -> familias -> costo de venta consolidado."""
-        sc = scope_stock(scope_br("BR-01"), "FAM-REP")
+        sc = scope_stock(scope_op("OP-01"), "FAM-REP")
         fam = val(self.values, "COGS_FAMILY", sc, "2027-01")
         unidad = self.version.configuration.unit("BU-01")
         productos = [p.id for p in unidad.products if p.family_id == "FAM-REP"]
-        suma = sum(val(self.values, "COGS", f"BR:BR-01#P:{pid}", "2027-01")
+        suma = sum(val(self.values, "COGS", f"OP:OP-01#P:{pid}", "2027-01")
                    for pid in productos)
         self.assertEqual(fam, suma)
 
@@ -431,7 +446,7 @@ class TestGovernance(unittest.TestCase):
         """Doc 01 §5."""
         service, budget, version = bootstrap(load_inputs=False, close_config=False)
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-01", value=D(1),
-                        business_unit_id="BU-01", branch_id="BR-01", product_id="P-001")
+                        operation_id="OP-01", product_id="P-001")
         with self.assertRaises(BudgetError) as ctx:
             service.submit_input("u.br01", version, iv, "budget.sales.load")
         self.assertEqual(ctx.exception.code, "CONFIGURATION_NOT_CLOSED")
@@ -445,14 +460,14 @@ class TestGovernance(unittest.TestCase):
     def test_scope_de_usuario(self):
         """Doc 04 §51: tener permiso no alcanza; hay que tener alcance."""
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-01", value=D(10),
-                        business_unit_id="BU-01", branch_id="BR-02", product_id="P-001")
+                        operation_id="OP-02", product_id="P-001")
         with self.assertRaises(BudgetError) as ctx:
             self.service.submit_input("u.br01", self.version, iv, "budget.sales.load")
         self.assertEqual(ctx.exception.code, "UNAUTHORIZED_SCOPE")
 
     def test_capacidad_requerida(self):
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-01", value=D(10),
-                        business_unit_id="BU-01", branch_id="BR-01", product_id="P-001")
+                        operation_id="OP-01", product_id="P-001")
         with self.assertRaises(BudgetError) as ctx:
             self.service.submit_input("u.admin", self.version, iv, "budget.sales.load")
         self.assertEqual(ctx.exception.code, "UNAUTHORIZED")
@@ -491,13 +506,13 @@ class TestGovernance(unittest.TestCase):
     def test_aprobacion_parcial_sobrevive(self):
         """Doc 04 §47: lo aprobado que no fue afectado sigue aprobado."""
         t_sales_br1 = next(t for t in self.version.tasks.values()
-                           if t.concept == "SALES" and t.scope_key == "BR:BR-01")
+                           if t.concept == "SALES" and t.scope_key == "OP:OP-01")
         t_sales_br3 = next(t for t in self.version.tasks.values()
-                           if t.concept == "SALES" and t.scope_key == "BR:BR-03")
+                           if t.concept == "SALES" and t.scope_key == "OP:OP-03")
         for t in (t_sales_br1, t_sales_br3):
             t.status = TaskStatus.APPROVED
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-01", value=D(2600),
-                        business_unit_id="BU-01", branch_id="BR-01", product_id="P-001")
+                        operation_id="OP-01", product_id="P-001")
         self.service.submit_input("u.br01", self.version, iv, "budget.sales.load")
         self.assertEqual(t_sales_br1.status, TaskStatus.IN_REVIEW)
         self.assertEqual(t_sales_br3.status, TaskStatus.APPROVED)
@@ -523,7 +538,7 @@ class TestDependencyGraph(unittest.TestCase):
 
     def test_impacto_de_un_cambio(self):
         """Doc 04 §48: qué se afecta si cambia un input."""
-        key = nk("SALES", "BR:BR-01#P:P-001", "2027-03")
+        key = nk("SALES", "OP:OP-01#P:P-001", "2027-03")
         impact = self.version.impact_of([key])
         self.assertGreater(impact["affected_count"], 20)
         self.assertIn("EBITDA", impact["by_metric"])
@@ -532,12 +547,12 @@ class TestDependencyGraph(unittest.TestCase):
     def test_recalculo_incremental_da_lo_mismo_que_completo(self):
         """Doc 03 §43: recalcular sólo lo afectado no puede cambiar el resultado."""
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-03", value=D(3000),
-                        business_unit_id="BU-01", branch_id="BR-01", product_id="P-001")
+                        operation_id="OP-01", product_id="P-001")
         self.service.submit_input("u.br01", self.version, iv, "budget.sales.load")
         completo = self.version.calculate(force=True)
         self.version._values = self.values  # simula estado previo
         incremental = self.version.recalculate_from(
-            [nk("SALES", "BR:BR-01#P:P-001", "2027-03")]
+            [nk("SALES", "OP:OP-01#P:P-001", "2027-03")]
         )
         for m in ("SALES", "COGS", "EBITDA", "RESULT_AFTER_ALLOCATION"):
             self.assertEqual(completo[nk(m, scope_co(), FY)], incremental[nk(m, scope_co(), FY)],
@@ -620,7 +635,7 @@ class TestImport(unittest.TestCase):
         from io import BytesIO
         from openpyxl import load_workbook
         from app.services.import_export import sales_template
-        data = sales_template(self.version, "BR-02")
+        data = sales_template(self.version, "OP-02")
         ws = load_workbook(BytesIO(data))["Carga"]
         periodos = {ws.cell(row=r, column=6).value for r in range(2, ws.max_row + 1)}
         self.assertTrue(all(p >= "2027-04" for p in periodos))  # abre en junio
@@ -631,7 +646,7 @@ class TestImport(unittest.TestCase):
         from openpyxl import load_workbook
         from app.services.import_export import parse_sales_import, sales_template
 
-        data = sales_template(self.version, "BR-01")
+        data = sales_template(self.version, "OP-01")
         wb = load_workbook(BytesIO(data))
         ws = wb["Carga"]
         col = [c.value for c in ws[1]].index("VALOR") + 1
@@ -640,7 +655,7 @@ class TestImport(unittest.TestCase):
         ws.cell(row=3, column=col).value = "diez"     # error en una fila
         buf = BytesIO(); wb.save(buf)
 
-        result, parsed = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
+        result, parsed = parse_sales_import(self.version, buf.getvalue(), "OP-01", "u.br01")
         self.assertEqual(result.status, "REJECTED")
         self.assertEqual(parsed, [])
         self.assertEqual(result.errors[0].row, 3)
@@ -652,13 +667,13 @@ class TestImport(unittest.TestCase):
         from openpyxl import load_workbook
         from app.services.import_export import parse_sales_import, sales_template
 
-        data = sales_template(self.version, "BR-01")
+        data = sales_template(self.version, "OP-01")
         wb = load_workbook(BytesIO(data)); ws = wb["Carga"]
         col = [c.value for c in ws[1]].index("VALOR") + 1
         for r in range(2, ws.max_row + 1):
             ws.cell(row=r, column=col).value = 0
         buf = BytesIO(); wb.save(buf)
-        result, parsed = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
+        result, parsed = parse_sales_import(self.version, buf.getvalue(), "OP-01", "u.br01")
         self.assertEqual(result.status, "COMMITTED")
         self.assertTrue(parsed)
 
@@ -667,7 +682,7 @@ class TestImport(unittest.TestCase):
             ws.cell(row=r, column=col).value = 0
         ws.cell(row=2, column=col).value = None
         buf = BytesIO(); wb.save(buf)
-        result, _ = parse_sales_import(self.version, buf.getvalue(), "BR-01", "u.br01")
+        result, _ = parse_sales_import(self.version, buf.getvalue(), "OP-01", "u.br01")
         self.assertEqual(result.status, "REJECTED")
         self.assertIn("vacía", result.errors[0].error)
 

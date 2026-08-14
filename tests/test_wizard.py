@@ -42,13 +42,20 @@ class WizardCase(unittest.TestCase):
     def unidad(self, name="Retail", **extra):
         self.paso("estructura", "unidad", {"name": name, **extra})
 
-    def sucursal(self, v, name, unit_id, **extra):
-        """Alta en el catálogo de la empresa y después asignación, con selector."""
+    def sucursal(self, v, name, unit_id=None, **extra):
+        """Alta de la sucursal y, si se indica unidad, de la operación con su CC."""
         self.paso("estructura", "sucursal", {"name": name, **extra})
         branch = next(b for b in v.configuration.branches if b.name == name)
-        self.paso("estructura", "asignar",
-                  {"branch_id": branch.id, "business_unit_id": unit_id})
+        if unit_id:
+            self.operacion(v, unit_id, branch.id)
         return branch
+
+    def operacion(self, v, unit_id, branch_id, expect=200, **extra):
+        """La combinación unidad x sucursal, que siempre trae su centro de costo."""
+        data = {"business_unit_id": unit_id, "branch_id": branch_id,
+                "cost_center_code": f"CC{len(v.configuration.operations) + 1:03d}"}
+        data.update(extra)
+        return self.paso("estructura", "operacion", data, expect)
 
     def producto(self, unit_id, code, name, family_id, expect=200, **extra):
         data = {"business_unit_id": unit_id, "code": code, "name": name,
@@ -78,7 +85,8 @@ class WizardCase(unittest.TestCase):
         self.sucursal(v, "Sucursal Este", unit.id, effective_from="2028-07-01")
         self.paso("estructura", "soporte", {"name": "Administración"})
         su = v.configuration.support_units[0]
-        self.paso("estructura", "centro", {"support_unit_id": su.id, "name": "Contabilidad"})
+        self.paso("estructura", "centro", {"support_unit_id": su.id, "code": "900",
+                                           "name": "Contabilidad"})
         sucursales = v.configuration.unit_branches(unit.id)
         self.assertEqual(len(sucursales), 2)
         self.assertEqual(sucursales[1].effective_from.month, 7)
@@ -109,7 +117,7 @@ class WizardCase(unittest.TestCase):
         # ---- módulos
         self.paso("modulos", "modulos", {
             "capex_enabled": "1", "capex_frequency": "MONTHLY",
-            "inventory_enabled": "1", "inventory_level": "BRANCH",
+            "inventory_enabled": "1", "inventory_level": "OPERATION",
             "inventory_frequency": "QUARTERLY", "inventory_currency": "USD",
             "purchases_enabled": "1", "balance_enabled": "1", "balance_currency": "USD"})
         self.paso("modulos", "capex_categoria", {"name": "Equipamiento"})
@@ -281,9 +289,12 @@ class WizardCase(unittest.TestCase):
         gerente = create_web_app(self.service, self.budget.id).test_client()
         gerente.post("/login", data={"user_id": "u.marcos"})
         gerente.post("/versiones/seleccionar", data={"version_id": v.id})
-        propias = [t for t in v.tasks.values()
-                   if t.scope_key == f"BR:{central.id}"]
+        op_central = v.configuration.branch_operations(central.id)[0]
+        propias = [t for t in v.tasks.values() if t.scope_key == f"OP:{op_central.id}"]
         self.assertEqual(len(propias), 2)          # ventas y dotación de Central
+        # el alcance sobre la sucursal alcanza a la operación que vive ahí
+        self.assertTrue(self.service.users["u.marcos"].has_scope(
+            f"OP:{op_central.id}", v.configuration))
 
         t_ventas = next(t for t in propias if t.concept == "SALES")
         gerente.post(f"/tareas/{t_ventas.id}",
@@ -296,8 +307,9 @@ class WizardCase(unittest.TestCase):
                      follow_redirects=True)
 
         # y no puede tocar la sucursal Norte
+        op_norte = v.configuration.branch_operations(norte.id)[0]
         t_norte = next(t for t in v.tasks.values()
-                       if t.scope_key == f"BR:{norte.id}" and t.concept == "SALES")
+                       if t.scope_key == f"OP:{op_norte.id}" and t.concept == "SALES")
         r = gerente.post(f"/tareas/{t_norte.id}",
                          data={f"S~{unit.products[0].id}~{v.configuration.periods[0].code}": "500"},
                          follow_redirects=True)
@@ -332,37 +344,71 @@ class WizardCase(unittest.TestCase):
 
 
     # ------------------------------------------------------------------
-    def test_una_unidad_en_varias_sucursales_una_sucursal_una_unidad(self):
-        """La relación es 1 a N: la unidad puede estar en muchas sucursales,
-        pero cada sucursal pertenece a una sola unidad."""
+    def test_relacion_n_a_n_entre_unidades_y_sucursales(self):
+        """Una unidad opera en varias sucursales y una sucursal aloja varias
+        unidades. Cada combinación es una operación con su propio centro de costo."""
         v = self.crear()
         self.unidad("Retail")
         self.unidad("Mayorista")
-        retail, mayorista = v.configuration.business_units
-
+        cfg = v.configuration
+        retail, mayorista = cfg.business_units
         for nombre in ("Centro", "Norte", "Sur"):
-            self.sucursal(v, nombre, retail.id)
-        self.assertEqual(len(v.configuration.unit_branches(retail.id)), 3)
-        self.assertEqual(v.configuration.unit_branches(mayorista.id), [])
+            self.paso("estructura", "sucursal", {"name": nombre})
+        centro, norte, sur = cfg.branches
 
-        # cada sucursal apunta a una única unidad
-        for b in v.configuration.branches:
-            self.assertEqual(b.business_unit_id, retail.id)
-            self.assertEqual(v.configuration.branch_owner(b.id).id, retail.id)
+        # Retail opera en las tres
+        for b in (centro, norte, sur):
+            self.operacion(v, retail.id, b.id)
+        self.assertEqual(len(cfg.unit_branches(retail.id)), 3)
 
-        # reasignar una sucursal la mueve de unidad, no la duplica
-        sur = next(b for b in v.configuration.branches if b.name == "Sur")
-        self.paso("estructura", "asignar",
-                  {"branch_id": sur.id, "business_unit_id": mayorista.id})
-        self.assertEqual(len(v.configuration.unit_branches(retail.id)), 2)
-        self.assertEqual(len(v.configuration.unit_branches(mayorista.id)), 1)
-        self.assertEqual(len(v.configuration.branches), 3)
+        # y Mayorista también opera en Centro: la misma sucursal, dos unidades
+        self.operacion(v, mayorista.id, centro.id)
+        self.assertEqual({u.id for u in cfg.branch_units(centro.id)},
+                         {retail.id, mayorista.id})
+        self.assertEqual(len(cfg.operations), 4)
 
-        # y una sucursal sin unidad existe, pero no deja cerrar
-        self.paso("estructura", "asignar", {"branch_id": sur.id, "business_unit_id": ""})
-        self.assertEqual(len(v.configuration.unassigned_branches()), 1)
-        self.assertTrue(any("no está asignada" in e
-                            for e in v.configuration.validate_structure()))
+        # cada operación tiene su centro de costo, y ningún código se repite
+        codigos = [o.cost_center.code for o in cfg.operations]
+        self.assertEqual(len(set(codigos)), 4)
+
+        # la misma combinación no se puede crear dos veces
+        r = self.operacion(v, retail.id, centro.id)
+        self.assertIn(b"DUPLICATE_OPERATION", r.data)
+        self.assertEqual(len(cfg.operations), 4)
+
+        # y borrar la operación no borra ni la unidad ni la sucursal
+        op = cfg.operation_for(mayorista.id, centro.id)
+        self.client.post(
+            f"/configurar/estructura/borrar/operation/{op.id}", follow_redirects=True)
+        self.assertEqual(len(cfg.operations), 3)
+        self.assertEqual(len(cfg.branches), 3)
+        self.assertEqual(len(cfg.business_units), 2)
+        # Mayorista queda sin operar en ningún lado: eso no deja cerrar
+        self.assertTrue(any("UNIT_WITHOUT_OPERATION" in e for e in cfg.validate_structure()))
+
+    def test_cada_operacion_necesita_su_centro_de_costo(self):
+        v = self.crear()
+        self.unidad("Retail")
+        self.paso("estructura", "sucursal", {"name": "Centro"})
+        cfg = v.configuration
+        r = self.paso("estructura", "operacion",
+                      {"business_unit_id": cfg.business_units[0].id,
+                       "branch_id": cfg.branches[0].id, "cost_center_code": ""})
+        self.assertIn(b"MISSING_COST_CENTER", r.data)
+        self.assertEqual(cfg.operations, [])
+
+    def test_no_se_repite_el_codigo_de_centro_de_costo(self):
+        v = self.crear()
+        self.unidad("Retail")
+        cfg = v.configuration
+        for nombre in ("Centro", "Norte"):
+            self.paso("estructura", "sucursal", {"name": nombre})
+        self.operacion(v, cfg.business_units[0].id, cfg.branches[0].id,
+                       cost_center_code="101")
+        r = self.operacion(v, cfg.business_units[0].id, cfg.branches[1].id,
+                           cost_center_code="101")
+        self.assertIn(b"DUPLICATE_COST_CENTER_CODE", r.data)
+        self.assertEqual(len(cfg.operations), 1)
 
     def test_no_se_repite_el_nombre_de_una_sucursal(self):
         v = self.crear()
@@ -486,63 +532,65 @@ class BrowserDefaultsCase(unittest.TestCase):
         return self.client.post(f"/configurar/estructura/{action}", data=data,
                                 follow_redirects=True)
 
-    def test_reenviar_la_asignacion_no_desasigna_otra_sucursal(self):
-        """El caso real que se rompió: asignar la segunda sucursal dejaba la
-        primera sin unidad, porque el valor por defecto del selector era
-        'quitar asignación' y el de sucursal era siempre la primera."""
+    def operacion(self, unit_id, branch_id, code):
+        return self.post("operacion", {"business_unit_id": unit_id, "branch_id": branch_id,
+                                       "cost_center_code": code})
+
+    def test_crear_una_operacion_no_toca_las_anteriores(self):
+        """El caso que se rompió con la asignación: dar de alta la segunda
+        combinación no puede deshacer la primera."""
         self.post("unidad", {"name": "Retail"})
         unit = self.v.configuration.business_units[0]
         self.post("sucursal", {"name": "Centro"})
-        self.post("asignar", {"branch_id": self.v.configuration.branches[0].id,
-                              "business_unit_id": unit.id})
         self.post("sucursal", {"name": "Norte"})
-        self.post("asignar", {"branch_id": self.v.configuration.branches[1].id,
-                              "business_unit_id": unit.id})
-        asignadas = lambda: [b.business_unit_id for b in self.v.configuration.branches]
-        self.assertEqual(asignadas(), [unit.id, unit.id])
+        centro, norte = self.v.configuration.branches
+        self.operacion(unit.id, centro.id, "101")
+        self.operacion(unit.id, norte.id, "102")
+        pares = lambda: [(o.business_unit_id, o.branch_id) for o in self.v.configuration.operations]
+        self.assertEqual(pares(), [(unit.id, centro.id), (unit.id, norte.id)])
 
-        # ahora, lo que hace un navegador: enviar cada formulario tal como está
+        # y ahora lo que hace un navegador: reenviar el formulario tal como está
         html = self.client.get("/configurar/estructura").data.decode()
-        formularios = forms_in(html, "/asignar")
-        self.assertEqual(len(formularios), 2)      # uno por sucursal, en su fila
-        for f in formularios:
+        for f in forms_in(html, "/operacion"):
             self.client.post(f.action, data=f.data, follow_redirects=True)
-        self.assertEqual(asignadas(), [unit.id, unit.id])
+        self.assertEqual(pares(), [(unit.id, centro.id), (unit.id, norte.id)])
 
-    def test_cada_formulario_trae_su_propia_sucursal(self):
+    def test_el_formulario_de_operacion_vacio_no_crea_nada(self):
+        """Viene con los selectores en la primera opción y el código vacío:
+        reenviarlo sin escribir nada tiene que fallar, no crear una operación."""
         self.post("unidad", {"name": "Retail"})
-        unit = self.v.configuration.business_units[0]
-        for nombre in ("Centro", "Norte", "Sur"):
-            self.post("sucursal", {"name": nombre})
-        for b in self.v.configuration.branches:
-            self.post("asignar", {"branch_id": b.id, "business_unit_id": unit.id})
-
+        self.post("sucursal", {"name": "Centro"})
         html = self.client.get("/configurar/estructura").data.decode()
-        formularios = forms_in(html, "/asignar")
-        ids = [f.data.get("branch_id") for f in formularios]
-        self.assertEqual(ids, [b.id for b in self.v.configuration.branches])
-        # y cada selector viene posicionado en la unidad que la sucursal ya tiene
-        for f in formularios:
-            self.assertEqual(f.data.get("business_unit_id"), unit.id)
+        formularios = forms_in(html, "/operacion")
+        self.assertEqual(len(formularios), 1)
+        r = self.client.post(formularios[0].action, data=formularios[0].data,
+                             follow_redirects=True)
+        self.assertIn(b"MISSING_COST_CENTER", r.data)
+        self.assertEqual(self.v.configuration.operations, [])
 
-    def test_desasignar_sigue_siendo_posible_pero_explicito(self):
+    def test_los_selectores_traen_todas_las_opciones(self):
+        """Se elige de un selector para no equivocarse escribiendo el nombre."""
+        for nombre in ("Retail", "Mayorista"):
+            self.post("unidad", {"name": nombre})
+        for nombre in ("Centro", "Norte"):
+            self.post("sucursal", {"name": nombre})
+        html = self.client.get("/configurar/estructura").data.decode()
+        for u in self.v.configuration.business_units:
+            self.assertIn(f'value="{u.id}"', html)
+        for b in self.v.configuration.branches:
+            self.assertIn(f'value="{b.id}"', html)
+
+    def test_borrar_una_sucursal_se_lleva_sus_operaciones(self):
         self.post("unidad", {"name": "Retail"})
         unit = self.v.configuration.business_units[0]
         self.post("sucursal", {"name": "Centro"})
-        branch = self.v.configuration.branches[0]
-        self.post("asignar", {"branch_id": branch.id, "business_unit_id": unit.id})
-        self.post("asignar", {"branch_id": branch.id, "business_unit_id": ""})
-        self.assertIsNone(branch.business_unit_id)
-
-    def test_un_envio_sin_el_campo_no_borra_la_asignacion(self):
-        self.post("unidad", {"name": "Retail"})
-        unit = self.v.configuration.business_units[0]
-        self.post("sucursal", {"name": "Centro"})
-        branch = self.v.configuration.branches[0]
-        self.post("asignar", {"branch_id": branch.id, "business_unit_id": unit.id})
-        r = self.post("asignar", {"branch_id": branch.id})      # sin el campo
-        self.assertIn(b"INVALID_ASSIGNMENT", r.data)
-        self.assertEqual(branch.business_unit_id, unit.id)
+        centro = self.v.configuration.branches[0]
+        self.operacion(unit.id, centro.id, "101")
+        self.assertEqual(len(self.v.configuration.operations), 1)
+        self.client.post(f"/configurar/estructura/borrar/branch/{centro.id}",
+                         follow_redirects=True)
+        self.assertEqual(self.v.configuration.operations, [])
+        self.assertEqual(len(self.v.configuration.business_units), 1)
 
 
 class IdempotenciaCase(unittest.TestCase):
@@ -561,7 +609,9 @@ class IdempotenciaCase(unittest.TestCase):
         cfg = self.version.configuration
         return {
             "unidades": [u.id for u in cfg.business_units],
-            "sucursales": [(b.id, b.business_unit_id) for b in cfg.branches],
+            "sucursales": [b.id for b in cfg.branches],
+            "operaciones": [(o.id, o.business_unit_id, o.branch_id, o.cost_center.code)
+                            for o in cfg.operations],
             "soporte": [(s.id, [c.id for c in s.cost_centers]) for s in cfg.support_units],
             "familias": [f.id for u in cfg.business_units for f in u.families],
             "productos": [(p.id, str(p.margin), str(p.commission_rate))

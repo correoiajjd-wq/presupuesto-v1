@@ -65,7 +65,7 @@ class RatioDef:
     metrics: tuple[str, ...]                      # métricas calculadas que consume
     required_inputs: tuple[str, ...]              # conceptos de input que arrastra
     fn: Callable[[dict, int], Optional[Decimal]]  # (métricas, días del período)
-    levels: tuple[str, ...] = ("COMPANY", "BUSINESS_UNIT", "BRANCH")
+    levels: tuple[str, ...] = ("COMPANY", "BUSINESS_UNIT", "BRANCH", "OPERATION")
     annual_only: bool = False
     notes: str = ""
 

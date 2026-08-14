@@ -12,7 +12,7 @@
   <div class="row" style="margin-top:10px">
     <div style="flex:1"><label class="small">Nivel de carga</label>
       <select name="inventory_level" {{ 'disabled' if not editable }}>
-        {% for lvl, lbl in [('COMPANY','Empresa'),('BUSINESS_UNIT','Unidad de negocio'),('BRANCH','Sucursal')] %}
+        {% for lvl, lbl in [('COMPANY','Empresa'),('BUSINESS_UNIT','Unidad de negocio'),('OPERATION','Operación (unidad x sucursal)')] %}
         <option value="{{ lvl }}" {{ 'selected' if cfg.inventory.level.value==lvl }}>{{ lbl }}</option>{% endfor %}
       </select></div>
     <div style="flex:1"><label class="small">Frecuencia de compras</label>

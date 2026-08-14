@@ -40,9 +40,9 @@ class MarginFormula(str, Enum):
 
 class ExpenseTargetType(str, Enum):
     COMPANY = "COMPANY"
-    BUSINESS_UNIT = "BUSINESS_UNIT"
-    BRANCH = "BRANCH"
-    COST_CENTER = "COST_CENTER"
+    BUSINESS_UNIT = "BUSINESS_UNIT"   # se reparte entre sus operaciones
+    BRANCH = "BRANCH"                 # se reparte entre las operaciones de la sucursal
+    COST_CENTER = "COST_CENTER"       # el de una operación o el de un área de soporte
 
 
 class AllocationMode(str, Enum):
@@ -59,7 +59,7 @@ class AllocationMode(str, Enum):
 class InventoryLevel(str, Enum):
     COMPANY = "COMPANY"
     BUSINESS_UNIT = "BUSINESS_UNIT"
-    BRANCH = "BRANCH"
+    OPERATION = "OPERATION"           # por combinación unidad x sucursal
 
 
 class BalanceSection(str, Enum):
@@ -118,21 +118,41 @@ class Effectivity(BaseModel):
 
 
 class Branch(Effectivity):
-    """Sucursal.
+    """Sucursal: una ubicación física de la empresa.
 
-    Se da de alta a nivel empresa para que el nombre exista una sola vez, y
-    después se asigna a su unidad de negocio eligiéndola de un selector. Una
-    sucursal pertenece a una única unidad; mientras no esté asignada, existe
-    pero no genera cargas.
+    Existe por sí misma. Qué unidades de negocio operan en ella se define
+    en las operaciones (ver Operation): una sucursal puede alojar varias
+    unidades, y una unidad puede estar en varias sucursales.
     """
 
     id: str
     name: str
-    business_unit_id: Optional[str] = None
 
-    @property
-    def assigned(self) -> bool:
-        return self.business_unit_id is not None
+
+class CostCenter(BaseModel):
+    """Centro de costo: el lugar donde se registran los gastos de algo.
+
+    Lo tiene cada combinación unidad x sucursal y cada área de soporte.
+    """
+
+    id: str
+    code: str
+    name: str
+
+
+class Operation(Effectivity):
+    """La combinación de una unidad de negocio operando en una sucursal.
+
+    Es la unidad mínima del presupuesto: acá se cargan las ventas y la
+    dotación, y contra su centro de costo se registran sus gastos. Las
+    unidades y las sucursales son dos formas de agrupar operaciones, no
+    dos niveles de una jerarquía.
+    """
+
+    id: str
+    business_unit_id: str
+    branch_id: str
+    cost_center: CostCenter
 
 
 class ProductFamily(BaseModel):
@@ -225,11 +245,6 @@ class BusinessUnit(Effectivity):
                 if not any(p.family_id == f.id and p.is_other for p in self.products)]
 
 
-class CostCenter(BaseModel):
-    id: str
-    name: str
-
-
 class SupportUnit(Effectivity):
     id: str
     name: str
@@ -261,11 +276,6 @@ class ExpenseTarget(BaseModel):
         prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}[
             self.target_type.value]
         return f"{prefix}:{self.target_id}"
-
-    @property
-    def corporate(self) -> bool:
-        """Empresa y centros de costo se muestran asignados debajo del EBITDA."""
-        return self.target_type in (ExpenseTargetType.COMPANY, ExpenseTargetType.COST_CENTER)
 
 
 class ExpenseDefinition(BaseModel):
@@ -358,7 +368,7 @@ class CapexConfig(BaseModel):
 
 class InventoryConfig(BaseModel):
     enabled: bool = False
-    level: InventoryLevel = InventoryLevel.BRANCH
+    level: InventoryLevel = InventoryLevel.OPERATION
     frequency: Frequency = Frequency.MONTHLY
     currency: str = "USD"
     purchases_enabled: bool = True
@@ -440,7 +450,8 @@ class Configuration(BaseModel):
     enabled_currencies: list[str] = Field(default_factory=list)
 
     business_units: list[BusinessUnit] = Field(default_factory=list)
-    branches: list[Branch] = Field(default_factory=list)      # catálogo de la empresa
+    branches: list[Branch] = Field(default_factory=list)
+    operations: list[Operation] = Field(default_factory=list)  # unidad x sucursal
     support_units: list[SupportUnit] = Field(default_factory=list)
     expenses: list[ExpenseDefinition] = Field(default_factory=list)
     payroll: PayrollConfig = Field(default_factory=PayrollConfig)
@@ -499,35 +510,74 @@ class Configuration(BaseModel):
                 return b
         raise ConfigurationError("INVALID_BRANCH", branch_id)
 
-    def branch_owner(self, branch_id: str) -> BusinessUnit:
-        b = self.branch(branch_id)
-        if not b.assigned:
-            raise ConfigurationError("UNASSIGNED_BRANCH",
-                                     f"la sucursal {b.name} no está asignada a ninguna unidad")
-        return self.unit(b.business_unit_id)
+    # -- operaciones: la unidad mínima del presupuesto ---------------------
+    def operation(self, operation_id: str) -> Operation:
+        for o in self.operations:
+            if o.id == operation_id:
+                return o
+        raise ConfigurationError("INVALID_OPERATION", operation_id)
+
+    def operation_for(self, unit_id: str, branch_id: str) -> Optional[Operation]:
+        for o in self.operations:
+            if o.business_unit_id == unit_id and o.branch_id == branch_id:
+                return o
+        return None
+
+    def unit_operations(self, unit_id: str) -> list[Operation]:
+        return [o for o in self.operations if o.business_unit_id == unit_id]
+
+    def branch_operations(self, branch_id: str) -> list[Operation]:
+        return [o for o in self.operations if o.branch_id == branch_id]
+
+    def operation_unit(self, operation_id: str) -> BusinessUnit:
+        return self.unit(self.operation(operation_id).business_unit_id)
+
+    def operation_branch(self, operation_id: str) -> Branch:
+        return self.branch(self.operation(operation_id).branch_id)
+
+    def operation_label(self, operation_id: str) -> str:
+        o = self.operation(operation_id)
+        return f"{self.unit(o.business_unit_id).name} / {self.branch(o.branch_id).name}"
 
     def unit_branches(self, unit_id: str) -> list[Branch]:
-        return [b for b in self.branches if b.business_unit_id == unit_id]
+        """Las sucursales donde opera la unidad."""
+        return [self.branch(o.branch_id) for o in self.unit_operations(unit_id)]
 
-    def all_branches(self) -> list[tuple[BusinessUnit, Branch]]:
-        """Sólo las sucursales asignadas: son las que participan del presupuesto."""
-        out = []
-        for b in self.branches:
-            if b.assigned:
-                try:
-                    out.append((self.unit(b.business_unit_id), b))
-                except ConfigurationError:
-                    continue
-        return out
+    def branch_units(self, branch_id: str) -> list[BusinessUnit]:
+        """Las unidades que operan en la sucursal."""
+        return [self.unit(o.business_unit_id) for o in self.branch_operations(branch_id)]
 
     def unassigned_branches(self) -> list[Branch]:
-        return [b for b in self.branches if not b.assigned]
+        """Sucursales donde todavía no opera ninguna unidad."""
+        return [b for b in self.branches if not self.branch_operations(b.id)]
 
-    def cost_center_owner(self, cc_id: str) -> SupportUnit:
-        for u in self.support_units:
-            for cc in u.cost_centers:
+    def units_without_operations(self) -> list[BusinessUnit]:
+        return [u for u in self.business_units if not self.unit_operations(u.id)]
+
+    # -- centros de costo --------------------------------------------------
+    def cost_centers(self) -> list[tuple[CostCenter, str, str]]:
+        """(centro de costo, tipo de dueño, etiqueta)."""
+        out = [(o.cost_center, "OPERATION", self.operation_label(o.id))
+               for o in self.operations]
+        out += [(cc, "SUPPORT_UNIT", f"{su.name} / {cc.name}")
+                for su in self.support_units for cc in su.cost_centers]
+        return out
+
+    def cost_center(self, cc_id: str) -> CostCenter:
+        for cc, _kind, _label in self.cost_centers():
+            if cc.id == cc_id:
+                return cc
+        raise ConfigurationError("INVALID_COST_CENTER", cc_id)
+
+    def cost_center_owner(self, cc_id: str):
+        """Devuelve ('OPERATION', Operation) o ('SUPPORT_UNIT', SupportUnit)."""
+        for o in self.operations:
+            if o.cost_center.id == cc_id:
+                return "OPERATION", o
+        for su in self.support_units:
+            for cc in su.cost_centers:
                 if cc.id == cc_id:
-                    return u
+                    return "SUPPORT_UNIT", su
         raise ConfigurationError("INVALID_COST_CENTER", cc_id)
 
     def scope_label(self, scope_key: str) -> str:
@@ -538,18 +588,43 @@ class Configuration(BaseModel):
             if kind == "BU":
                 return self.unit(_id).name
             if kind == "BR":
-                b = self.branch(_id)
-                owner = self.unit(b.business_unit_id).name if b.assigned else "sin asignar"
-                return f"{owner} / {b.name}"
+                return self.branch(_id).name
+            if kind == "OP":
+                return self.operation_label(_id)
             if kind == "SU":
                 return self.support_unit(_id).name
             if kind == "CC":
-                su = self.cost_center_owner(_id)
-                cc = next(c for c in su.cost_centers if c.id == _id)
-                return f"{su.name} / {cc.name}"
+                kind_owner, owner = self.cost_center_owner(_id)
+                cc = self.cost_center(_id)
+                if kind_owner == "OPERATION":
+                    return f"{self.operation_label(owner.id)} ({cc.code})"
+                return f"{owner.name} / {cc.name} ({cc.code})"
         except Exception:
             pass
         return scope_key
+
+    def scope_ancestors(self, scope_key: str) -> set[str]:
+        """Ámbitos que contienen a este. Una operación pertenece a la vez a su
+        unidad de negocio y a su sucursal: son dos agrupaciones distintas."""
+        out = {"CO"}
+        if scope_key == "CO" or ":" not in scope_key:
+            return out
+        kind, _id = scope_key.split(":", 1)
+        try:
+            if kind == "OP":
+                o = self.operation(_id)
+                out |= {f"BU:{o.business_unit_id}", f"BR:{o.branch_id}",
+                        f"CC:{o.cost_center.id}"}
+            elif kind == "CC":
+                kind_owner, owner = self.cost_center_owner(_id)
+                if kind_owner == "OPERATION":
+                    out |= {f"OP:{owner.id}", f"BU:{owner.business_unit_id}",
+                            f"BR:{owner.branch_id}"}
+                else:
+                    out.add(f"SU:{owner.id}")
+        except ConfigurationError:
+            pass
+        return out
 
     def is_active(self, entity: Effectivity, period) -> bool:
         """Vigencia por período (doc 02 §7)."""
@@ -571,12 +646,18 @@ class Configuration(BaseModel):
                 "no está en las monedas habilitadas")
         if not self.business_units:
             errors.append("INCOMPLETE_CONFIGURATION: no hay unidades de negocio")
-        if not self.all_branches():
-            errors.append("INCOMPLETE_CONFIGURATION: no hay sucursales asignadas a una unidad")
+        if not self.branches:
+            errors.append("INCOMPLETE_CONFIGURATION: no hay sucursales")
+        if not self.operations:
+            errors.append("INCOMPLETE_CONFIGURATION: no hay ninguna unidad operando en "
+                          "ninguna sucursal")
 
         for b in self.unassigned_branches():
             errors.append(
-                f"UNASSIGNED_BRANCH: la sucursal {b.name} no está asignada a ninguna unidad")
+                f"BRANCH_WITHOUT_OPERATION: en la sucursal {b.name} no opera ninguna unidad")
+        for u in self.units_without_operations():
+            errors.append(
+                f"UNIT_WITHOUT_OPERATION: la unidad {u.name} no opera en ninguna sucursal")
 
         seen_ids: set[str] = set()
 
@@ -598,10 +679,34 @@ class Configuration(BaseModel):
                     errors.append(
                         f"INVALID_PERIOD: sucursal {b.name} fecha de {label} fuera del ejercicio")
 
+        pares: set[tuple[str, str]] = set()
+        codigos: set[str] = set()
+        for o in self.operations:
+            uniq("OP", o.id)
+            par = (o.business_unit_id, o.branch_id)
+            if par in pares:
+                errors.append(
+                    f"DUPLICATE_OPERATION: {self.operation_label(o.id)} está más de una vez")
+            pares.add(par)
+            try:
+                self.unit(o.business_unit_id)
+                self.branch(o.branch_id)
+            except ConfigurationError as exc:
+                errors.append(str(exc))
+                continue
+            uniq("CC", o.cost_center.id)
+            code = o.cost_center.code.strip().lower()
+            if code in codigos:
+                errors.append(
+                    f"DUPLICATE_COST_CENTER_CODE: el código {o.cost_center.code} está repetido")
+            codigos.add(code)
+            for f, label in ((o.effective_from, "inicio"), (o.effective_to, "cierre")):
+                if f and not (fy.start <= f <= fy.end):
+                    errors.append(f"INVALID_PERIOD: {self.operation_label(o.id)} "
+                                  f"fecha de {label} fuera del ejercicio")
+
         for u in self.business_units:
             uniq("BU", u.id)
-            if not self.unit_branches(u.id):
-                errors.append(f"INCOMPLETE_CONFIGURATION: la unidad {u.name} no tiene sucursales")
             if not u.products:
                 errors.append(f"INCOMPLETE_CONFIGURATION: la unidad {u.name} no tiene productos")
             for fam in u.missing_other_products():
@@ -619,6 +724,11 @@ class Configuration(BaseModel):
             uniq("SU", su.id)
             for cc in su.cost_centers:
                 uniq("CC", cc.id)
+                code = cc.code.strip().lower()
+                if code in codigos:
+                    errors.append(
+                        f"DUPLICATE_COST_CENTER_CODE: el código {cc.code} está repetido")
+                codigos.add(code)
 
         known = seen_ids
         prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}
@@ -626,10 +736,10 @@ class Configuration(BaseModel):
             uniq("EXP", e.id)
             if e.currency not in self.enabled_currencies:
                 errors.append(f"INVALID_CURRENCY: {e.currency} en gasto {e.name}")
-            for t in e.targets:
-                if t.target_type is ExpenseTargetType.COMPANY:
+            for tg in e.targets:
+                if tg.target_type is ExpenseTargetType.COMPANY:
                     continue
-                key = f"{prefix[t.target_type.value]}:{t.target_id}"
+                key = f"{prefix[tg.target_type.value]}:{tg.target_id}"
                 if key not in known:
                     errors.append(
                         f"INVALID_EXPENSE_TARGET: el gasto {e.name} apunta a {key}, que no existe")
@@ -654,7 +764,7 @@ class Configuration(BaseModel):
             if not any(i.section is BalanceSection.EQUITY for i in self.balance.items):
                 errors.append("INCOMPLETE_CONFIGURATION: balance sin rubro de patrimonio")
 
-        from .ratios import RATIO_CATALOG  # import local para evitar ciclo
+        from .ratios import RATIO_CATALOG
 
         for r in self.ratios:
             if r.ratio_code not in RATIO_CATALOG:

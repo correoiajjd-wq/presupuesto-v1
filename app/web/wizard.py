@@ -22,8 +22,8 @@ from typing import Optional
 from ..domain.config import (
     AllocationMode, BalanceItem, BalanceSection, BalanceSource, Branch, BusinessUnit,
     CapexCategory, ConfigStatus, Configuration, CostCenter, ExpenseDefinition, ExpenseTarget,
-    ExpenseTargetType, InventoryLevel, MarginFormula, Objective, ObjectiveType, PayrollArea,
-    PayrollPercentageConcept, Product, ProductFamily, RatioSelection, Role,
+    ExpenseTargetType, InventoryLevel, MarginFormula, Objective, ObjectiveType, Operation,
+    PayrollArea, PayrollPercentageConcept, Product, ProductFamily, RatioSelection, Role,
     SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowStep,
 )
 from ..domain.money import FXTable
@@ -43,8 +43,10 @@ STEPS: list[Step] = [
     Step("general", "Datos generales", Role.CFO,
          "Empresa, ejercicio, monedas habilitadas y tipos de cambio estimados."),
     Step("estructura", "Estructura", Role.CFO,
-         "Primero se dan de alta las sucursales, para que cada nombre exista una sola vez. "
-         "Después se asigna cada una a su unidad de negocio eligiéndolas de un selector. "
+         "Sucursales y unidades de negocio se dan de alta por separado; después se crea "
+         "cada operación: la combinación de una unidad operando en una sucursal. Una unidad "
+         "puede estar en varias sucursales y una sucursal alojar varias unidades. Cada "
+         "combinación necesita su centro de costo, porque ahí se registran sus gastos. "
          "Todo puede tener fecha de inicio y de cierre dentro del ejercicio."),
     Step("productos", "Productos y familias", Role.COO,
          "El COO define el catálogo de cada unidad. La modalidad de venta y la fórmula de "
@@ -236,32 +238,57 @@ def add_branch(version, form) -> Branch:
     return branch
 
 
-def assign_branch(version, form) -> Branch:
-    """Asocia una sucursal a su unidad de negocio.
+def _cost_center_ids(cfg: Configuration) -> list[str]:
+    return ([o.cost_center.id for o in cfg.operations]
+            + [c.id for u in cfg.support_units for c in u.cost_centers])
 
-    La asignación se hace desde la fila de cada sucursal, con el selector ya
-    posicionado en su unidad actual. Así el formulario no puede tocar una
-    sucursal distinta de la que se está mirando, y reenviarlo sin cambiar nada
-    no hace nada.
 
-    Desasignar es explícito: hay que elegir "sin asignar". Si el formulario
-    directamente no trae el campo, no se toca nada — un envío incompleto no
-    puede borrar una asignación existente.
+def _check_cost_center_code(cfg: Configuration, code: str) -> str:
+    code = (code or "").strip()
+    if not code:
+        raise BudgetError(
+            "MISSING_COST_CENTER",
+            "Indicá el código del centro de costo: es donde se van a registrar los gastos "
+            "de esta combinación.")
+    if any(cc.code.strip().lower() == code.lower() for cc, _k, _l in cfg.cost_centers()):
+        raise BudgetError("DUPLICATE_COST_CENTER_CODE",
+                          f"ya existe un centro de costo con el código {code}")
+    return code
+
+
+def add_operation(version, form) -> Operation:
+    """Crea la operación: una unidad de negocio operando en una sucursal.
+
+    Es la unidad mínima del presupuesto. La relación es de muchos a muchos:
+    una unidad puede operar en varias sucursales y una sucursal alojar varias
+    unidades. Cada combinación se crea con su propio centro de costo, porque
+    es contra él que se imputan sus gastos.
     """
     assert_open(version)
     cfg = version.configuration
-    branch = cfg.branch(form["branch_id"])
-    if "business_unit_id" not in form:
-        raise BudgetError("INVALID_ASSIGNMENT",
-                          "El formulario no indicó ninguna unidad de negocio.")
     unit_id = (form.get("business_unit_id") or "").strip()
-    if not unit_id:
-        branch.business_unit_id = None
-    else:
-        cfg.unit(unit_id)
-        branch.business_unit_id = unit_id
+    branch_id = (form.get("branch_id") or "").strip()
+    if not unit_id or not branch_id:
+        raise BudgetError("INVALID_OPERATION",
+                          "Elegí la unidad de negocio y la sucursal de la combinación.")
+    unit = cfg.unit(unit_id)
+    branch = cfg.branch(branch_id)
+    if cfg.operation_for(unit_id, branch_id):
+        raise BudgetError("DUPLICATE_OPERATION",
+                          f"{unit.name} ya opera en {branch.name}.")
+    code = _check_cost_center_code(cfg, form.get("cost_center_code"))
+    nombre = (form.get("cost_center_name") or "").strip() or f"{unit.name} / {branch.name}"
+    op = Operation(
+        id=_next_id([o.id for o in cfg.operations], "OP"),
+        business_unit_id=unit_id,
+        branch_id=branch_id,
+        cost_center=CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), code=code, name=nombre),
+        effective_from=_opt_date(form.get("effective_from")),
+        effective_to=_opt_date(form.get("effective_to")),
+    )
+    cfg.operations.append(op)
     version.invalidate()
-    return branch
+    return op
 
 
 def add_support_unit(version, form) -> SupportUnit:
@@ -280,8 +307,8 @@ def add_cost_center(version, form) -> CostCenter:
     assert_open(version)
     cfg = version.configuration
     su = cfg.support_unit(form["support_unit_id"])
-    cc = CostCenter(id=_next_id([c.id for u in cfg.support_units for c in u.cost_centers], "CC"),
-                    name=_name(form))
+    code = _check_cost_center_code(cfg, form.get("code"))
+    cc = CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), code=code, name=_name(form))
     su.cost_centers.append(cc)
     version.invalidate()
     return cc
@@ -344,8 +371,12 @@ def expense_target_options(cfg: Configuration) -> list[tuple[str, str, str]]:
     """(clave de destino, etiqueta, grupo) para el formulario de gastos."""
     out = [("COMPANY:", "Empresa (corporativo)", "Empresa")]
     out += [(f"BUSINESS_UNIT:{u.id}", u.name, "Unidades de negocio") for u in cfg.business_units]
-    out += [(f"BRANCH:{b.id}", f"{u.name} / {b.name}", "Sucursales") for u, b in cfg.all_branches()]
-    out += [(f"COST_CENTER:{c.id}", f"{s.name} / {c.name}", "Centros de costo")
+    out += [(f"BRANCH:{b.id}", b.name, "Sucursales") for b in cfg.branches]
+    out += [(f"COST_CENTER:{o.cost_center.id}",
+             f"{cfg.operation_label(o.id)} ({o.cost_center.code})",
+             "Centros de costo de operaciones") for o in cfg.operations]
+    out += [(f"COST_CENTER:{c.id}", f"{s.name} / {c.name} ({c.code})",
+             "Centros de costo de soporte")
             for s in cfg.support_units for c in s.cost_centers]
     return out
 
@@ -374,7 +405,7 @@ def add_expense(version, form) -> ExpenseDefinition:
             target_type=ExpenseTargetType(ttype),
             target_id=tid or None,
             percentage=pct,
-            distribute_to_branches=(ttype == "BUSINESS_UNIT"
+            distribute_to_branches=(ttype in ("BUSINESS_UNIT", "BRANCH")
                                     and bool(form.get(f"split_{raw}"))),
         ))
 
@@ -567,7 +598,8 @@ def default_workflow(version) -> None:
 def scope_options(cfg: Configuration) -> list[tuple[str, str]]:
     out = [("", "Toda la empresa")]
     out += [(f"BU:{u.id}", f"Unidad — {u.name}") for u in cfg.business_units]
-    out += [(f"BR:{b.id}", f"Sucursal — {u.name} / {b.name}") for u, b in cfg.all_branches()]
+    out += [(f"BR:{b.id}", f"Sucursal — {b.name}") for b in cfg.branches]
+    out += [(f"OP:{o.id}", f"Operación — {cfg.operation_label(o.id)}") for o in cfg.operations]
     out += [(f"SU:{u.id}", f"Soporte — {u.name}") for u in cfg.support_units]
     return out
 
@@ -608,18 +640,29 @@ def remove_user(service, user_id: str) -> None:
 def remove(version, kind: str, entity_id: str, parent_id: Optional[str] = None) -> None:
     assert_open(version)
     cfg = version.configuration
+    def _borrar_operaciones(ops: list) -> None:
+        """Al irse una unidad o una sucursal se van sus operaciones, y con ellas
+        sus centros de costo: los gastos imputados ahí quedan sin destino."""
+        muertas = {o.id for o in ops}
+        ccs = {o.cost_center.id for o in ops}
+        cfg.operations = [o for o in cfg.operations if o.id not in muertas]
+        for e in cfg.expenses:
+            e.targets = [t for t in e.targets if t.target_id not in ccs]
+
     if kind == "business_unit":
+        _borrar_operaciones(cfg.unit_operations(entity_id))
         cfg.business_units = [u for u in cfg.business_units if u.id != entity_id]
-        for b in cfg.branches:
-            if b.business_unit_id == entity_id:
-                b.business_unit_id = None
         for e in cfg.expenses:
             e.targets = [t for t in e.targets if t.target_id != entity_id]
         cfg.expenses = [e for e in cfg.expenses if e.targets]
     elif kind == "branch":
+        _borrar_operaciones(cfg.branch_operations(entity_id))
         cfg.branches = [b for b in cfg.branches if b.id != entity_id]
         for e in cfg.expenses:
             e.targets = [t for t in e.targets if t.target_id != entity_id]
+        cfg.expenses = [e for e in cfg.expenses if e.targets]
+    elif kind == "operation":
+        _borrar_operaciones([cfg.operation(entity_id)])
         cfg.expenses = [e for e in cfg.expenses if e.targets]
     elif kind == "support_unit":
         cfg.support_units = [u for u in cfg.support_units if u.id != entity_id]
@@ -662,7 +705,8 @@ def step_state(version) -> dict[str, dict]:
     """Qué está listo y qué falta, por paso. Alimenta el índice del wizard."""
     cfg = version.configuration
     fx_ok = all(r["loaded"] for r in fx_summary(version))
-    branches = cfg.all_branches()
+    sin_operacion = cfg.unassigned_branches()
+    unidades_sueltas = cfg.units_without_operations()
     products_ok = bool(cfg.business_units) and all(
         u.products and u.families and not u.missing_other_products()
         for u in cfg.business_units)
@@ -674,13 +718,16 @@ def step_state(version) -> dict[str, dict]:
                                f"{cfg.fiscal_year_end:%d/%m/%Y} · "
                                f"{', '.join(cfg.enabled_currencies)}"
                                + ("" if fx_ok else " · faltan tipos de cambio"))},
-        "estructura": {"ready": bool(cfg.business_units) and bool(branches)
-                                and not cfg.unassigned_branches(),
-                       "detail": f"{len(cfg.business_units)} unidades · {len(branches)} "
-                                 f"sucursales asignadas"
-                                 + (f" · {len(cfg.unassigned_branches())} sin asignar"
-                                    if cfg.unassigned_branches() else "")
-                                 + f" · {len(cfg.support_units)} de soporte"},
+        "estructura": {"ready": bool(cfg.operations) and not sin_operacion
+                                and not unidades_sueltas,
+                       "detail": f"{len(cfg.business_units)} unidades · "
+                                 f"{len(cfg.branches)} sucursales · "
+                                 f"{len(cfg.operations)} operaciones"
+                                 + (f" · {len(sin_operacion)} sucursales sin unidad"
+                                    if sin_operacion else "")
+                                 + (f" · {len(unidades_sueltas)} unidades sin sucursal"
+                                    if unidades_sueltas else "")
+                                 + f" · {len(cfg.support_units)} áreas de soporte"},
         "productos": {"ready": products_ok,
                       "detail": f"{sum(len(u.products) for u in cfg.business_units)} productos · "
                                 f"{sum(len(u.families) for u in cfg.business_units)} familias"},
@@ -691,7 +738,10 @@ def step_state(version) -> dict[str, dict]:
         "modulos": {"ready": modules_ok,
                     "detail": " · ".join(filter(None, [
                         "CAPEX" if cfg.capex.enabled else "",
-                        f"Stock por {cfg.inventory.level.value.lower()}" if cfg.inventory.enabled else "",
+                        ("Stock por " + {"COMPANY": "empresa",
+                                          "BUSINESS_UNIT": "unidad de negocio",
+                                          "OPERATION": "operación"}[cfg.inventory.level.value])
+                        if cfg.inventory.enabled else "",
                         "Balance" if cfg.balance.enabled else ""])) or "ninguno habilitado"},
         "ratios": {"ready": bool(cfg.ratios),
                    "detail": f"{len(cfg.ratios)} seleccionados · "
