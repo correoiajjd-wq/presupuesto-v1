@@ -92,6 +92,19 @@ def _next_id(existing: list[str], prefix: str, width: int = 2) -> str:
     return f"{prefix}-{n:0{width}d}"
 
 
+def _name(form, campo: str = "name") -> str:
+    """Un nombre vacío no crea nada.
+
+    Sin esto, reenviar un formulario de alta sin escribir nada da de alta una
+    entidad sin nombre — el mismo tipo de error que el valor por defecto
+    destructivo en un selector.
+    """
+    valor = (form.get(campo) or "").strip()
+    if not valor:
+        raise BudgetError("MISSING_NAME", "El nombre no puede quedar vacío.")
+    return valor
+
+
 def _opt_date(raw: str) -> Optional[date]:
     raw = (raw or "").strip()
     return date.fromisoformat(raw) if raw else None
@@ -196,9 +209,7 @@ def add_business_unit(version, form) -> BusinessUnit:
     cfg = version.configuration
     unit = BusinessUnit(
         id=_next_id([u.id for u in cfg.business_units], "BU"),
-        name=form["name"].strip(),
-        commission_rate=(_pct(form["commission_rate"])
-                         if form.get("commission_rate", "").strip() else None),
+        name=_name(form),
         effective_from=_opt_date(form.get("effective_from")),
         effective_to=_opt_date(form.get("effective_to")),
     )
@@ -211,7 +222,7 @@ def add_branch(version, form) -> Branch:
     """Alta de la sucursal en el catálogo de la empresa, todavía sin unidad."""
     assert_open(version)
     cfg = version.configuration
-    name = form["name"].strip()
+    name = _name(form)
     if any(b.name.strip().lower() == name.lower() for b in cfg.branches):
         raise BudgetError("DUPLICATE_BRANCH_NAME", f"ya existe una sucursal llamada {name}")
     branch = Branch(
@@ -226,11 +237,23 @@ def add_branch(version, form) -> Branch:
 
 
 def assign_branch(version, form) -> Branch:
-    """Asocia una sucursal existente a una unidad de negocio. Ambos por selector,
-    para que los nombres no se dupliquen ni se confundan."""
+    """Asocia una sucursal a su unidad de negocio.
+
+    La asignación se hace desde la fila de cada sucursal, con el selector ya
+    posicionado en su unidad actual. Así el formulario no puede tocar una
+    sucursal distinta de la que se está mirando, y reenviarlo sin cambiar nada
+    no hace nada.
+
+    Desasignar es explícito: hay que elegir "sin asignar". Si el formulario
+    directamente no trae el campo, no se toca nada — un envío incompleto no
+    puede borrar una asignación existente.
+    """
     assert_open(version)
     cfg = version.configuration
     branch = cfg.branch(form["branch_id"])
+    if "business_unit_id" not in form:
+        raise BudgetError("INVALID_ASSIGNMENT",
+                          "El formulario no indicó ninguna unidad de negocio.")
     unit_id = (form.get("business_unit_id") or "").strip()
     if not unit_id:
         branch.business_unit_id = None
@@ -245,7 +268,7 @@ def add_support_unit(version, form) -> SupportUnit:
     assert_open(version)
     cfg = version.configuration
     su = SupportUnit(id=_next_id([u.id for u in cfg.support_units], "SU"),
-                     name=form["name"].strip(),
+                     name=_name(form),
                      effective_from=_opt_date(form.get("effective_from")),
                      effective_to=_opt_date(form.get("effective_to")))
     cfg.support_units.append(su)
@@ -258,7 +281,7 @@ def add_cost_center(version, form) -> CostCenter:
     cfg = version.configuration
     su = cfg.support_unit(form["support_unit_id"])
     cc = CostCenter(id=_next_id([c.id for u in cfg.support_units for c in u.cost_centers], "CC"),
-                    name=form["name"].strip())
+                    name=_name(form))
     su.cost_centers.append(cc)
     version.invalidate()
     return cc
@@ -272,7 +295,7 @@ def add_family(version, form) -> ProductFamily:
     cfg = version.configuration
     unit = cfg.unit(form["business_unit_id"])
     fam = ProductFamily(id=_next_id([f.id for u in cfg.business_units for f in u.families], "FAM"),
-                        name=form["name"].strip())
+                        name=_name(form))
     unit.families.append(fam)
     version.invalidate()
     return fam
@@ -291,8 +314,8 @@ def add_product(version, form) -> Product:
     margin_formula = MarginFormula(form.get("margin_formula", "PERCENTAGE_OF_SALES"))
     product = Product(
         id=_next_id([p.id for u in cfg.business_units for p in u.products], "P", 3),
-        code=form["code"].strip().upper(),
-        name=form["name"].strip(),
+        code=_name(form, "code").upper(),
+        name=_name(form),
         family_id=family_id,
         sales_mode=SalesMode(form.get("sales_mode", "UNIT_BASED")),
         margin_formula=margin_formula,
@@ -301,6 +324,8 @@ def add_product(version, form) -> Product:
         margin=Decimal(1) if margin_formula is MarginFormula.NO_COST else _pct(form["margin"]),
         sales_frequency=Frequency(form["sales_frequency"]),
         is_other=is_other,
+        commission_rate=(_pct(form["commission_rate"])
+                         if form.get("commission_rate", "").strip() else None),
     )
     # El "Otros" es por familia: cada familia necesita el suyo, y sólo uno.
     if is_other and any(p.is_other and p.family_id == family_id for p in unit.products):
@@ -355,7 +380,7 @@ def add_expense(version, form) -> ExpenseDefinition:
 
     ed = ExpenseDefinition(
         id=_next_id([e.id for e in cfg.expenses], "EXP"),
-        name=form["name"].strip(),
+        name=_name(form),
         allocation_mode=mode,
         targets=targets,
         currency=form["currency"].strip().upper(),
@@ -374,7 +399,7 @@ def add_payroll_area(version, form) -> PayrollArea:
     assert_open(version)
     cfg = version.configuration
     area = PayrollArea(id=_next_id([a.id for a in cfg.payroll.areas], "AR"),
-                       name=form["name"].strip(),
+                       name=_name(form),
                        base_salary=_dec(form["base_salary"]),
                        currency=form["currency"].strip().upper())
     cfg.payroll.areas.append(area)
@@ -385,6 +410,8 @@ def add_payroll_area(version, form) -> PayrollArea:
 def add_increase_rule(version, form) -> None:
     assert_open(version)
     cfg = version.configuration
+    if not (form.get("effective_date") or "").strip():
+        raise BudgetError("MISSING_DATE", "Indicá desde cuándo rige el aumento.")
     cfg.payroll.increase_rules.append(SalaryIncreaseRule(
         effective_date=date.fromisoformat(form["effective_date"]),
         percentage=_pct(form["percentage"])))
@@ -396,7 +423,7 @@ def add_percentage_concept(version, form) -> None:
     assert_open(version)
     cfg = version.configuration
     cfg.payroll.percentage_concepts.append(PayrollPercentageConcept(
-        concept=form["concept"].strip(), percentage=_pct(form["percentage"])))
+        concept=_name(form, "concept"), percentage=_pct(form["percentage"])))
     version.invalidate()
 
 
@@ -428,7 +455,7 @@ def add_capex_category(version, form) -> None:
     cfg = version.configuration
     cfg.capex.categories.append(CapexCategory(
         id=_next_id([c.id for c in cfg.capex.categories], "CAT"),
-        name=form["name"].strip()))
+        name=_name(form)))
     version.invalidate()
 
 
@@ -437,7 +464,7 @@ def add_balance_item(version, form) -> None:
     cfg = version.configuration
     cfg.balance.items.append(BalanceItem(
         id=_next_id([i.id for i in cfg.balance.items], "BI"),
-        name=form["name"].strip(),
+        name=_name(form),
         section=BalanceSection(form["section"]),
         current=form.get("current") == "1",
         source=BalanceSource(form.get("source", "MANUAL")),
@@ -483,7 +510,11 @@ def update_ratios(version, form) -> None:
             value = _pct(raw) if unit is RatioUnit.PERCENTAGE else _dec(raw)
             objective = Objective(type=otype, value=value)
         out.append(RatioSelection(ratio_code=code, objective=objective))
-    cfg.ratios = out
+    # Asignar una lista no vuelve a pasar por el validador del modelo, así que
+    # el orden canónico se aplica también acá.
+    from ..domain.ratios import CATALOG
+    orden = {r.code: i for i, r in enumerate(CATALOG)}
+    cfg.ratios = sorted(out, key=lambda s: orden.get(s.ratio_code, 999))
     version.invalidate()
 
 
@@ -549,9 +580,7 @@ def add_user(service, version, form):
     """
     from ..services.budget import User
 
-    name = form["name"].strip()
-    if not name:
-        raise BudgetError("INVALID_USER", "El nombre es obligatorio.")
+    name = _name(form)
     roles = {Role(r) for r in form.getlist("role")}
     if not roles:
         raise BudgetError("INVALID_USER", "Elegí al menos un rol.")

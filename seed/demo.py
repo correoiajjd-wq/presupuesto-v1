@@ -40,7 +40,7 @@ def D(x) -> Decimal:
 # ==========================================================================
 def build_configuration() -> Configuration:
     repuestos = BusinessUnit(
-        id="BU-01", name="Repuestos", commission_rate=None,
+        id="BU-01", name="Repuestos",
         families=[
             ProductFamily(id="FAM-REP", name="Repuestos mecánicos"),
             ProductFamily(id="FAM-ACC", name="Accesorios"),
@@ -65,17 +65,19 @@ def build_configuration() -> Configuration:
         ],
     )
     servicios = BusinessUnit(
-        id="BU-02", name="Servicios", commission_rate=D("0.02"),
+        id="BU-02", name="Servicios",
         families=[ProductFamily(id="FAM-SVC", name="Servicios")],
         products=[
             Product(id="P-101", code="S001", name="Mantenimiento", family_id="FAM-SVC",
                     sales_mode=SalesMode.AMOUNT_BASED,
                     margin_formula=MarginFormula.PERCENTAGE_OF_SALES,
-                    currency="UYU", margin=D("0.40"), sales_frequency=Frequency.MONTHLY),
+                    currency="UYU", margin=D("0.40"), sales_frequency=Frequency.MONTHLY,
+                    commission_rate=D("0.02")),
             # Intangible: el precio de venta es todo margen, no tiene costo asociado.
             Product(id="P-102", code="S002", name="Consultoría", family_id="FAM-SVC",
                     sales_mode=SalesMode.AMOUNT_BASED, margin_formula=MarginFormula.NO_COST,
-                    currency="UYU", margin=D(1), sales_frequency=Frequency.MONTHLY),
+                    currency="UYU", margin=D(1), sales_frequency=Frequency.MONTHLY,
+                    commission_rate=D("0.05")),   # la consultoría comisiona más
             Product(id="P-199", code="XXSVC", name="Otros servicios", family_id="FAM-SVC",
                     sales_mode=SalesMode.AMOUNT_BASED, currency="UYU",
                     margin=D("0.35"), sales_frequency=Frequency.MONTHLY, is_other=True),

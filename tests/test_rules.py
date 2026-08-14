@@ -233,10 +233,37 @@ class TestPayroll(unittest.TestCase):
         self.assertEqual(enero, esperado)
 
     def test_comisiones_se_calculan_desde_ventas(self):
-        """Doc 01 §19: Ventas -> Nómina -> comisión."""
-        ventas = val(self.values, "SALES", scope_br("BR-03"), "2027-01")
+        """Doc 01 §19: Ventas -> Nómina -> comisión.
+
+        La tasa es de cada producto: dentro de la misma sucursal, unos
+        comisionan, otros comisionan distinto y otros no comisionan.
+        """
+        unidad = self.cfg.unit("BU-02")
+        esperado = D(0)
+        con_comision = 0
+        for prod in unidad.products:
+            ventas = val(self.values, "SALES", f"BR:BR-03#P:{prod.id}", "2027-01")
+            if prod.commission_rate:
+                esperado += ventas * prod.commission_rate
+                con_comision += 1
         comision = val(self.values, "COMMISSION", scope_br("BR-03"), "2027-01")
-        self.assertEqual(comision, ventas * D("0.02"))
+        self.assertEqual(comision, esperado)
+        self.assertGreater(con_comision, 1)          # más de una tasa distinta
+        self.assertLess(con_comision, len(unidad.products))   # y alguno sin comisión
+
+    def test_un_producto_sin_comision_no_aporta(self):
+        otros = self.cfg.unit("BU-02").product("P-199")
+        self.assertIsNone(otros.commission_rate)
+        ventas_otros = val(self.values, "SALES", "BR:BR-03#P:P-199", "2027-01")
+        self.assertGreater(ventas_otros, 0)
+        # la comisión total no incluye esas ventas
+        total_ventas = val(self.values, "SALES", scope_br("BR-03"), "2027-01")
+        comision = val(self.values, "COMMISSION", scope_br("BR-03"), "2027-01")
+        self.assertLess(comision, total_ventas * D("0.05"))
+
+    def test_la_comision_no_aplica_a_una_unidad_sin_tasas(self):
+        """Repuestos no tiene productos con comisión: no genera comisión."""
+        self.assertEqual(val(self.values, "COMMISSION", scope_br("BR-01"), "2027-01"), D(0))
 
     def test_nomina_de_soporte_no_esta_en_ebitda_de_la_unidad(self):
         pay_bu = sum(val(self.values, "PAYROLL", scope_bu(u.id)) for u in self.cfg.business_units)

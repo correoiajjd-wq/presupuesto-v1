@@ -247,12 +247,15 @@ class BudgetEngine:
                     "que no es sucursal ni unidad de soporte; se ignora"
                 )
 
-        # comisiones configuradas como % de ventas (doc 01 §19)
-        commission_rate: dict[str, Decimal] = {}
+        # Comisiones como % de ventas (doc 01 §19). La tasa es de cada producto:
+        # dentro de una misma sucursal, unos comisionan y otros no.
+        commission_products: dict[str, list[tuple[str, Decimal]]] = {}
         for unit in cfg.business_units:
-            if unit.commission_rate:
+            con_comision = [(p.id, p.commission_rate) for p in unit.products
+                            if p.commission_rate]
+            if con_comision:
                 for b in cfg.unit_branches(unit.id):
-                    commission_rate[scope_br(b.id)] = unit.commission_rate
+                    commission_products[scope_br(b.id)] = con_comision
 
         manual_commissions: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
         for iv in self.inputs.of(Concept.COMMISSION_AMOUNT):
@@ -296,14 +299,21 @@ class BudgetEngine:
 
                 # comisiones
                 comm_key = nk("COMMISSION", scope_key, p.code)
-                rate = commission_rate.get(scope_key)
-                if rate is not None:
-                    sales_key = nk("SALES", scope_key, p.code)
-                    self.g.calc(
-                        comm_key, [sales_key],
-                        lambda v, k=sales_key, r=rate: None if v.get(k) is None else v[k] * r,
-                        formula="ventas x tasa de comisión", rate=str(rate),
-                    )
+                productos = commission_products.get(scope_key)
+                if productos:
+                    branch_id = scope_key.split(":", 1)[1]
+                    deps = [nk("SALES", scope_prod(branch_id, pid), p.code)
+                            for pid, _ in productos]
+                    tasas = [rate for _, rate in productos]
+
+                    def _comision(v, deps=deps, tasas=tasas):
+                        total = ZERO
+                        for key, rate in zip(deps, tasas):
+                            total += (v.get(key) or ZERO) * rate
+                        return total
+
+                    self.g.calc(comm_key, deps, _comision,
+                                formula="suma de ventas por producto x su tasa de comisión")
                 else:
                     self.g.constant(comm_key, manual_commissions[scope_key].get(p, ZERO),
                                     kind="INPUT", formula="comisión cargada por Nómina")

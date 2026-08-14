@@ -156,6 +156,9 @@ class Product(BaseModel):
     margin: Decimal                             # constante en el ejercicio (V1)
     sales_frequency: Frequency = Frequency.MONTHLY
     is_other: bool = False                      # el obligatorio "XX — Otros" de la familia
+    #: Doc 01 §19: la comisión se calcula sobre las ventas de este producto.
+    #: Cada producto puede comisionar distinto, o no comisionar.
+    commission_rate: Optional[Decimal] = None
 
     @model_validator(mode="after")
     def _check(self) -> "Product":
@@ -186,7 +189,6 @@ class BusinessUnit(Effectivity):
     name: str
     families: list[ProductFamily] = Field(default_factory=list)
     products: list[Product] = Field(default_factory=list)
-    commission_rate: Optional[Decimal] = None  # doc 01 §19: comisión sobre ventas
 
     @model_validator(mode="after")
     def _check(self) -> "BusinessUnit":
@@ -449,6 +451,20 @@ class Configuration(BaseModel):
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
 
     status: ConfigStatus = ConfigStatus.DRAFT
+
+    @model_validator(mode="after")
+    def _canonical_order(self) -> "Configuration":
+        """Los ratios se guardan siempre en el orden del catálogo.
+
+        Así la configuración no depende del orden en que llegaron los campos
+        de un formulario, y volver a guardar la misma selección no produce
+        una configuración distinta.
+        """
+        from .ratios import CATALOG
+
+        orden = {r.code: i for i, r in enumerate(CATALOG)}
+        self.ratios.sort(key=lambda s: orden.get(s.ratio_code, 999))
+        return self
 
     # -- derivados ---------------------------------------------------------
     @property

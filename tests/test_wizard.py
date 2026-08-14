@@ -7,6 +7,7 @@ y que al cerrarlo el sistema quede listo para que la gente cargue.
 from __future__ import annotations
 
 import unittest
+from html.parser import HTMLParser
 
 from app.domain.config import ConfigStatus
 from app.services.budget import BudgetError
@@ -330,5 +331,272 @@ class WizardCase(unittest.TestCase):
         self.assertIn(b"UNAUTHORIZED", r.data)
 
 
+    # ------------------------------------------------------------------
+    def test_una_unidad_en_varias_sucursales_una_sucursal_una_unidad(self):
+        """La relación es 1 a N: la unidad puede estar en muchas sucursales,
+        pero cada sucursal pertenece a una sola unidad."""
+        v = self.crear()
+        self.unidad("Retail")
+        self.unidad("Mayorista")
+        retail, mayorista = v.configuration.business_units
+
+        for nombre in ("Centro", "Norte", "Sur"):
+            self.sucursal(v, nombre, retail.id)
+        self.assertEqual(len(v.configuration.unit_branches(retail.id)), 3)
+        self.assertEqual(v.configuration.unit_branches(mayorista.id), [])
+
+        # cada sucursal apunta a una única unidad
+        for b in v.configuration.branches:
+            self.assertEqual(b.business_unit_id, retail.id)
+            self.assertEqual(v.configuration.branch_owner(b.id).id, retail.id)
+
+        # reasignar una sucursal la mueve de unidad, no la duplica
+        sur = next(b for b in v.configuration.branches if b.name == "Sur")
+        self.paso("estructura", "asignar",
+                  {"branch_id": sur.id, "business_unit_id": mayorista.id})
+        self.assertEqual(len(v.configuration.unit_branches(retail.id)), 2)
+        self.assertEqual(len(v.configuration.unit_branches(mayorista.id)), 1)
+        self.assertEqual(len(v.configuration.branches), 3)
+
+        # y una sucursal sin unidad existe, pero no deja cerrar
+        self.paso("estructura", "asignar", {"branch_id": sur.id, "business_unit_id": ""})
+        self.assertEqual(len(v.configuration.unassigned_branches()), 1)
+        self.assertTrue(any("no está asignada" in e
+                            for e in v.configuration.validate_structure()))
+
+    def test_no_se_repite_el_nombre_de_una_sucursal(self):
+        v = self.crear()
+        self.paso("estructura", "sucursal", {"name": "Centro"})
+        r = self.paso("estructura", "sucursal", {"name": "centro"})
+        self.assertIn(b"DUPLICATE_BRANCH_NAME", r.data)
+        self.assertEqual(len(v.configuration.branches), 1)
+
+    def test_comision_por_producto(self):
+        """La comisión es de cada producto, no de la unidad."""
+        v = self.crear()
+        self.unidad("Servicios")
+        unit = v.configuration.business_units[0]
+        self.sucursal(v, "Centro", unit.id)
+        self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "General"})
+        fam = unit.families[0].id
+        self.producto(unit.id, "S001", "Mantenimiento", fam, commission_rate="2")
+        self.producto(unit.id, "XX", "Otros", fam, is_other="1")
+        con, sin = unit.products
+        self.assertEqual(float(con.commission_rate), 0.02)
+        self.assertIsNone(sin.commission_rate)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ==========================================================================
+# Lo que manda el navegador, no lo que manda el test
+# ==========================================================================
+class BrowserForm:
+    """Los valores por defecto de un formulario, como los enviaría un navegador.
+
+    Los tests que postean datos explícitos no ven una clase entera de errores:
+    la que aparece cuando el usuario envía el formulario sin tocar un campo y
+    el valor por defecto de ese campo hace algo destructivo.
+
+    Los campos que se repiten (checkboxes con el mismo nombre, selects
+    múltiples) se envían como lista, igual que hace un navegador.
+    """
+
+    def __init__(self, action: str):
+        self.action = action
+        self.data: dict[str, object] = {}
+
+    def add(self, name: str, value: str, multiple: bool) -> None:
+        if multiple:
+            self.data.setdefault(name, [])
+            if isinstance(self.data[name], list):
+                self.data[name].append(value)
+        else:
+            self.data[name] = value
+
+
+class FormScraper(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.forms: list[BrowserForm] = []
+        self._current: BrowserForm | None = None
+        self._select: str | None = None
+        self._select_multiple = False
+        self._select_options: list[tuple[str, bool]] = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self._current = BrowserForm(a.get("action", ""))
+            self.forms.append(self._current)
+        elif self._current is None:
+            return
+        elif tag == "input" and a.get("name"):
+            tipo = a.get("type")
+            if tipo in (None, "hidden", "text", "number", "date"):
+                self._current.add(a["name"], a.get("value", ""), False)
+            elif tipo == "checkbox" and "checked" in a:
+                self._current.add(a["name"], a.get("value", "on"), True)
+        elif tag == "select" and a.get("name"):
+            self._select = a["name"]
+            self._select_multiple = "multiple" in a
+            self._select_options = []
+        elif tag == "option" and self._select:
+            self._select_options.append((a.get("value", ""), "selected" in a))
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._current = None
+        elif tag == "select" and self._select and self._current is not None:
+            marcadas = [v for v, sel in self._select_options if sel]
+            if self._select_multiple:
+                for v in marcadas:
+                    self._current.add(self._select, v, True)
+            else:
+                # un navegador manda la opción marcada; si no hay, la primera
+                elegida = marcadas[0] if marcadas else (
+                    self._select_options[0][0] if self._select_options else "")
+                self._current.add(self._select, elegida, False)
+            self._select = None
+
+
+def forms_in(html: str, action_contains: str) -> list[BrowserForm]:
+    s = FormScraper()
+    s.feed(html)
+    return [f for f in s.forms if action_contains in f.action]
+
+
+class BrowserDefaultsCase(unittest.TestCase):
+    """Reenviar un formulario sin tocar nada no puede romper lo que ya está."""
+
+    def setUp(self):
+        self.service, self.budget, _ = bootstrap()
+        self.client = create_web_app(self.service, self.budget.id).test_client()
+        self.client.post("/login", data=CFO)
+        self.client.post("/nuevo", data={
+            "name": "Browser", "company_name": "Browser SA",
+            "fiscal_year_start": "2028-01-01", "fiscal_year_end": "2028-12-31",
+            "presentation_currency": "USD", "currencies": "USD"}, follow_redirects=True)
+        self.v = next(b for b in self.service.budgets.values()
+                      if b.name == "Browser").latest
+
+    def post(self, action, data):
+        return self.client.post(f"/configurar/estructura/{action}", data=data,
+                                follow_redirects=True)
+
+    def test_reenviar_la_asignacion_no_desasigna_otra_sucursal(self):
+        """El caso real que se rompió: asignar la segunda sucursal dejaba la
+        primera sin unidad, porque el valor por defecto del selector era
+        'quitar asignación' y el de sucursal era siempre la primera."""
+        self.post("unidad", {"name": "Retail"})
+        unit = self.v.configuration.business_units[0]
+        self.post("sucursal", {"name": "Centro"})
+        self.post("asignar", {"branch_id": self.v.configuration.branches[0].id,
+                              "business_unit_id": unit.id})
+        self.post("sucursal", {"name": "Norte"})
+        self.post("asignar", {"branch_id": self.v.configuration.branches[1].id,
+                              "business_unit_id": unit.id})
+        asignadas = lambda: [b.business_unit_id for b in self.v.configuration.branches]
+        self.assertEqual(asignadas(), [unit.id, unit.id])
+
+        # ahora, lo que hace un navegador: enviar cada formulario tal como está
+        html = self.client.get("/configurar/estructura").data.decode()
+        formularios = forms_in(html, "/asignar")
+        self.assertEqual(len(formularios), 2)      # uno por sucursal, en su fila
+        for f in formularios:
+            self.client.post(f.action, data=f.data, follow_redirects=True)
+        self.assertEqual(asignadas(), [unit.id, unit.id])
+
+    def test_cada_formulario_trae_su_propia_sucursal(self):
+        self.post("unidad", {"name": "Retail"})
+        unit = self.v.configuration.business_units[0]
+        for nombre in ("Centro", "Norte", "Sur"):
+            self.post("sucursal", {"name": nombre})
+        for b in self.v.configuration.branches:
+            self.post("asignar", {"branch_id": b.id, "business_unit_id": unit.id})
+
+        html = self.client.get("/configurar/estructura").data.decode()
+        formularios = forms_in(html, "/asignar")
+        ids = [f.data.get("branch_id") for f in formularios]
+        self.assertEqual(ids, [b.id for b in self.v.configuration.branches])
+        # y cada selector viene posicionado en la unidad que la sucursal ya tiene
+        for f in formularios:
+            self.assertEqual(f.data.get("business_unit_id"), unit.id)
+
+    def test_desasignar_sigue_siendo_posible_pero_explicito(self):
+        self.post("unidad", {"name": "Retail"})
+        unit = self.v.configuration.business_units[0]
+        self.post("sucursal", {"name": "Centro"})
+        branch = self.v.configuration.branches[0]
+        self.post("asignar", {"branch_id": branch.id, "business_unit_id": unit.id})
+        self.post("asignar", {"branch_id": branch.id, "business_unit_id": ""})
+        self.assertIsNone(branch.business_unit_id)
+
+    def test_un_envio_sin_el_campo_no_borra_la_asignacion(self):
+        self.post("unidad", {"name": "Retail"})
+        unit = self.v.configuration.business_units[0]
+        self.post("sucursal", {"name": "Centro"})
+        branch = self.v.configuration.branches[0]
+        self.post("asignar", {"branch_id": branch.id, "business_unit_id": unit.id})
+        r = self.post("asignar", {"branch_id": branch.id})      # sin el campo
+        self.assertIn(b"INVALID_ASSIGNMENT", r.data)
+        self.assertEqual(branch.business_unit_id, unit.id)
+
+
+class IdempotenciaCase(unittest.TestCase):
+    """Reenviar cualquier formulario del wizard, tal como viene, no cambia nada.
+
+    Es la garantía general contra el error que se coló en la asignación de
+    sucursales: un valor por defecto que hace algo que el usuario no pidió.
+    """
+
+    def setUp(self):
+        self.service, self.budget, self.version = bootstrap(close_config=False)
+        self.client = create_web_app(self.service, self.budget.id).test_client()
+        self.client.post("/login", data=CFO)
+
+    def _foto(self):
+        cfg = self.version.configuration
+        return {
+            "unidades": [u.id for u in cfg.business_units],
+            "sucursales": [(b.id, b.business_unit_id) for b in cfg.branches],
+            "soporte": [(s.id, [c.id for c in s.cost_centers]) for s in cfg.support_units],
+            "familias": [f.id for u in cfg.business_units for f in u.families],
+            "productos": [(p.id, str(p.margin), str(p.commission_rate))
+                          for u in cfg.business_units for p in u.products],
+            "gastos": [(e.id, [t.scope_key for t in e.targets]) for e in cfg.expenses],
+            "nomina": [(a.id, str(a.base_salary)) for a in cfg.payroll.areas],
+            "aumentos": [str(r.effective_date) for r in cfg.payroll.increase_rules],
+            "ratios": [(r.ratio_code, str(r.objective.value) if r.objective else None)
+                       for r in cfg.ratios],
+            "workflow": [(s.concept, s.loader_role.value, s.approver_role.value)
+                         for s in cfg.workflow.steps],
+            "modulos": (cfg.capex.enabled, cfg.inventory.enabled, cfg.balance.enabled,
+                        cfg.inventory.level.value, [i.id for i in cfg.balance.items]),
+        }
+
+    def test_reenviar_todos_los_formularios_no_cambia_la_configuracion(self):
+        antes = self._foto()
+        for step in ("general", "estructura", "productos", "gastos", "nomina",
+                     "modulos", "ratios", "workflow"):
+            html = self.client.get(f"/configurar/{step}").data.decode()
+            for f in forms_in(html, "/configurar/"):
+                if "borrar" in f.action or "default" in f.action:
+                    continue          # esos sí son acciones deliberadas
+                self.client.post(f.action, data=f.data, follow_redirects=True)
+        self.assertEqual(self._foto(), antes)
+
+    def test_los_formularios_de_alta_vacios_no_crean_nada(self):
+        cfg = self.version.configuration
+        cuantas = len(cfg.branches)
+        r = self.client.post("/configurar/estructura/sucursal", data={"name": "  "},
+                             follow_redirects=True)
+        self.assertIn(b"MISSING_NAME", r.data)
+        self.assertEqual(len(cfg.branches), cuantas)
+
+        cuantas = len(cfg.business_units)
+        self.client.post("/configurar/estructura/unidad", data={"name": ""},
+                         follow_redirects=True)
+        self.assertEqual(len(cfg.business_units), cuantas)

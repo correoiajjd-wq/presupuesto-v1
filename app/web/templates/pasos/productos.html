@@ -34,7 +34,7 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
 
   <table style="margin-top:18px">
   <thead><tr><th>Código</th><th>Producto</th><th>Familia</th><th>Modalidad</th>
-    <th>Precio</th><th>Margen</th><th>Frecuencia</th><th></th></tr></thead><tbody>
+    <th>Precio</th><th>Margen</th><th>Comisión</th><th>Frecuencia</th><th></th></tr></thead><tbody>
   {% for p in u.products %}
   <tr>
     <td>{{ p.code }}{% if p.is_other %} <span class="tag na">Otros</span>{% endif %}</td>
@@ -45,13 +45,14 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
     <td>{% if p.margin_formula.value=='NO_COST' %}<span class="tag ok">sin costo</span>
         {% else %}{{ (p.margin*100)|round(1) }}%
         <span class="small">{{ 'sobre ventas' if p.margin_formula.value=='PERCENTAGE_OF_SALES' else 'markup' }}</span>{% endif %}</td>
+    <td>{{ (p.commission_rate*100)|round(2) ~ '%' if p.commission_rate else '—' }}</td>
     <td class="small">{{ p.sales_frequency.value|lower }}</td>
     <td>{% if editable %}<form method="post"
         action="{{ url_for('configurar_borrar', step='productos', kind='product', entity_id=p.id) }}">
         <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="8" class="small">Sin productos.</td></tr>
+  <tr><td colspan="9" class="small">Sin productos.</td></tr>
   {% endfor %}
   </tbody></table>
 
@@ -84,6 +85,8 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
         {% for c in cfg.enabled_currencies %}<option>{{ c }}</option>{% endfor %}</select></div>
       <div style="width:110px"><label class="small">Margen %</label>
         <input type="number" step="any" name="margin" placeholder="30"></div>
+      <div style="width:120px"><label class="small">Comisión %</label>
+        <input type="number" step="any" name="commission_rate" placeholder="opcional"></div>
       <div style="width:150px"><label class="small">Frecuencia</label>
         <select name="sales_frequency">
           <option value="MONTHLY">Mensual</option><option value="QUARTERLY">Trimestral</option>
@@ -91,8 +94,9 @@ de Estructura. Los productos pertenecen a una unidad.</p></div>
     </div>
     <p class="small" style="margin-top:8px">El precio sólo hace falta si la venta es por unidades.
     Con la fórmula "sin costo" el margen queda en 100% — es el caso de un intangible, donde el
-    precio de venta no tiene costo asociado. En V1 precio y margen son constantes en el ejercicio;
-    lo que varía es la cantidad.</p>
+    precio de venta no tiene costo asociado. La comisión, si existe, se calcula sobre las ventas
+    de este producto y va al costo de nómina. En V1 precio y margen son constantes en el
+    ejercicio; lo que varía es la cantidad.</p>
     <button style="margin-top:6px">Agregar producto</button>
   </form>
   {% endif %}

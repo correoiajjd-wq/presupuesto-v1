@@ -4,12 +4,12 @@ Implementación funcionando de la parte que decide si el sistema sirve o no:
 **configuración → inputs → grafo de dependencias → cálculo → validación → workflow → versión**.
 
 No es el producto terminado. Es el motor, con la cadena completa andando de punta a punta
-sobre una empresa demo, y 90 tests que verifican reglas concretas del spec.
+sobre una empresa demo, y 101 tests que verifican reglas concretas del spec.
 
 ```
 PYTHONPATH=. python3 wsgi.py                           # interfaz web en :8000
 PYTHONPATH=. python3 run_demo.py --html reporte.html   # recorrido end-to-end por consola
-PYTHONPATH=. python3 -m unittest discover -s tests     # 90 tests
+PYTHONPATH=. python3 -m unittest discover -s tests     # 101 tests
 ```
 
 ---
@@ -103,6 +103,9 @@ Las que más costó dejar bien:
   el alquiler sólo en las sucursales que no son propias. Un gasto tiene una lista de destinos
   y dos modos de carga: un importe por cada destino (donde no corresponde se carga 0) o un
   total que se reparte con porcentajes fijos.
+- **La comisión es del producto.** Dentro de una misma sucursal unos productos comisionan,
+  otros comisionan distinto y otros no. La comisión de una sucursal es la suma de las ventas
+  de cada producto por su propia tasa, y va al costo de nómina.
 - **La fórmula de margen incluye "sin costo".** Para intangibles, donde el precio de venta es
   todo margen: el costo es 0 y el margen 100%. El motor trabaja con la proporción de costo de
   cada producto, así que las tres fórmulas conviven en la misma unidad.
@@ -117,6 +120,10 @@ Las que más costó dejar bien:
 - **Importación atómica.** Un error en una fila rechaza la planilla entera e informa
   fila / columna / valor / error / corrección esperada. El commit revierte todo si algo falla.
 - **Cero vs vacío.** `0` es válido, vacío es error.
+- **Los formularios son idempotentes.** Reenviar cualquier formulario del wizard tal como
+  viene no cambia nada. Hay un test que renderiza cada paso, extrae los valores por defecto
+  igual que haría un navegador y los reenvía: la configuración tiene que quedar idéntica.
+  Es la garantía contra los valores por defecto que hacen algo que el usuario no pidió.
 - **Inmutabilidad.** Cambiar el TC de una versión aprobada devuelve `409 VERSION_IMMUTABLE`
   en la API — y un trigger lo impide también en la base (`schema_postgres.sql`).
 
@@ -197,9 +204,10 @@ sesiones y entre varias personas, y cada paso dice de quién es:
    después las unidades de negocio, y recién ahí se asocia cada sucursal a su unidad
    eligiendo ambas de un selector. Así el nombre de una sucursal existe una sola vez y no
    se duplica por tipeo. Una sucursal sin unidad no genera cargas y no deja cerrar.
-3. **Productos y familias** — lo define el **COO**. La modalidad de venta y la fórmula de
-   margen son **de cada producto**, no de la unidad: la misma unidad puede vender mercadería
-   por unidades y servicios por monto. Cada familia necesita su propio producto "Otros".
+3. **Productos y familias** — lo define el **COO**. La modalidad de venta, la fórmula de
+   margen y la comisión son **de cada producto**, no de la unidad: la misma unidad puede
+   vender mercadería por unidades y servicios por monto, y cada producto comisiona distinto.
+   Cada familia necesita su propio producto "Otros".
 4. **Gastos** — qué existe, a qué **destinos** se imputa (varios a la vez), con qué
    frecuencia y moneda.
 5. **Nómina** — áreas con su sueldo base, reglas de aumento y conceptos porcentuales.
