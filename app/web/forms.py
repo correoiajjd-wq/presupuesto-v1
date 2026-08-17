@@ -123,7 +123,7 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
     return FormSpec(
         f"Ventas — {unit.name} / {branch.name}",
         f"Se carga la operación de {unit.name} en {branch.name}; los gastos propios de esta "
-        f"combinación van al centro de costo {op.cost_center.code}. "
+        f"combinación van al centro de costo {op.cost_center.name}. "
         "Cada producto se carga como lo define la configuración: por cantidad o por monto. "
         "El precio y el margen no se tocan acá; el sistema calcula ventas, costo y margen. "
         "Si un producto no se vende, cargá 0 (vacío es error).",

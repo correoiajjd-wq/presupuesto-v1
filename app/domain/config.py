@@ -133,10 +133,11 @@ class CostCenter(BaseModel):
     """Centro de costo: el lugar donde se registran los gastos de algo.
 
     Lo tiene cada combinación unidad x sucursal y cada área de soporte.
+    El nombre es la clave: es único en toda la empresa, así que alcanza para
+    identificarlo sin necesidad de un código aparte.
     """
 
     id: str
-    code: str
     name: str
 
 
@@ -597,8 +598,8 @@ class Configuration(BaseModel):
                 kind_owner, owner = self.cost_center_owner(_id)
                 cc = self.cost_center(_id)
                 if kind_owner == "OPERATION":
-                    return f"{self.operation_label(owner.id)} ({cc.code})"
-                return f"{owner.name} / {cc.name} ({cc.code})"
+                    return f"{self.operation_label(owner.id)} ({cc.name})"
+                return f"{owner.name} / {cc.name}"
         except Exception:
             pass
         return scope_key
@@ -680,7 +681,7 @@ class Configuration(BaseModel):
                         f"INVALID_PERIOD: sucursal {b.name} fecha de {label} fuera del ejercicio")
 
         pares: set[tuple[str, str]] = set()
-        codigos: set[str] = set()
+        nombres_cc: set[str] = set()
         for o in self.operations:
             uniq("OP", o.id)
             par = (o.business_unit_id, o.branch_id)
@@ -695,16 +696,17 @@ class Configuration(BaseModel):
                 errors.append(str(exc))
                 continue
             uniq("CC", o.cost_center.id)
-            code = o.cost_center.code.strip().lower()
-            if code in codigos:
-                errors.append(
-                    f"DUPLICATE_COST_CENTER_CODE: el código {o.cost_center.code} está repetido")
-            codigos.add(code)
+            nombre = o.cost_center.name.strip().lower()
+            if nombre in nombres_cc:
+                errors.append(f"DUPLICATE_COST_CENTER_NAME: hay más de un centro de costo "
+                              f"llamado {o.cost_center.name}")
+            nombres_cc.add(nombre)
             for f, label in ((o.effective_from, "inicio"), (o.effective_to, "cierre")):
                 if f and not (fy.start <= f <= fy.end):
                     errors.append(f"INVALID_PERIOD: {self.operation_label(o.id)} "
                                   f"fecha de {label} fuera del ejercicio")
 
+        codigos_producto: dict[str, str] = {}
         for u in self.business_units:
             uniq("BU", u.id)
             if not u.products:
@@ -715,6 +717,15 @@ class Configuration(BaseModel):
                     "producto 'Otros'")
             for p in u.products:
                 uniq("PROD", p.id)
+                # El código identifica al producto en toda la empresa: es lo que
+                # se escribe en las planillas de carga, y ahí no hay unidad ni
+                # familia que lo desambigüe.
+                code = p.code.strip().lower()
+                if code in codigos_producto:
+                    errors.append(
+                        f"DUPLICATE_PRODUCT_CODE: el código {p.code} ya lo usa "
+                        f"{codigos_producto[code]}")
+                codigos_producto[code] = f"{p.name} ({u.name})"
                 if p.currency not in self.enabled_currencies:
                     errors.append(f"INVALID_CURRENCY: {p.currency} en producto {p.code}")
             for f in u.families:
@@ -722,13 +733,18 @@ class Configuration(BaseModel):
 
         for su in self.support_units:
             uniq("SU", su.id)
+            # Un área de soporte sin centro de costo no tiene contra qué imputar
+            # sus gastos: no puede existir.
+            if not su.cost_centers:
+                errors.append(f"SUPPORT_UNIT_WITHOUT_COST_CENTER: el área {su.name} no tiene "
+                              "ningún centro de costo")
             for cc in su.cost_centers:
                 uniq("CC", cc.id)
-                code = cc.code.strip().lower()
-                if code in codigos:
-                    errors.append(
-                        f"DUPLICATE_COST_CENTER_CODE: el código {cc.code} está repetido")
-                codigos.add(code)
+                nombre = cc.name.strip().lower()
+                if nombre in nombres_cc:
+                    errors.append(f"DUPLICATE_COST_CENTER_NAME: hay más de un centro de costo "
+                                  f"llamado {cc.name}")
+                nombres_cc.add(nombre)
 
         known = seen_ids
         prefix = {"BUSINESS_UNIT": "BU", "BRANCH": "BR", "COST_CENTER": "CC"}

@@ -95,21 +95,18 @@ def build_configuration() -> Configuration:
     # Cada combinación unidad x sucursal es una operación con su centro de costo.
     operations = [
         Operation(id="OP-01", business_unit_id="BU-01", branch_id="BR-01",
-                  cost_center=CostCenter(id="CC-101", code="101",
-                                         name="Repuestos Montevideo")),
+                  cost_center=CostCenter(id="CC-101", name="Repuestos Montevideo")),
         Operation(id="OP-02", business_unit_id="BU-01", branch_id="BR-02",
-                  cost_center=CostCenter(id="CC-102", code="102", name="Repuestos Salto")),
+                  cost_center=CostCenter(id="CC-102", name="Repuestos Salto")),
         Operation(id="OP-03", business_unit_id="BU-02", branch_id="BR-03",
-                  cost_center=CostCenter(id="CC-103", code="103", name="Servicios Centro")),
+                  cost_center=CostCenter(id="CC-103", name="Servicios Centro")),
         # Servicios también opera dentro de la sucursal Montevideo: la misma
         # sucursal aloja dos unidades y cada una tiene su propio centro de costo.
         Operation(id="OP-04", business_unit_id="BU-02", branch_id="BR-01",
-                  cost_center=CostCenter(id="CC-104", code="104",
-                                         name="Servicios Montevideo")),
+                  cost_center=CostCenter(id="CC-104", name="Servicios Montevideo")),
     ]
     soporte = SupportUnit(id="SU-01", name="Administración central",
-                          cost_centers=[CostCenter(id="CC-01", code="900",
-                                                   name="Administración")])
+                          cost_centers=[CostCenter(id="CC-01", name="Administración")])
 
     def target(kind: str, tid=None, pct=None, split=False) -> ExpenseTarget:
         return ExpenseTarget(target_type=ExpenseTargetType(kind), target_id=tid,

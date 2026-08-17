@@ -85,7 +85,7 @@ resultados no se suman entre sí.</p>
 <tr>
   <td>{{ cfg.unit(o.business_unit_id).name }}</td>
   <td>{{ cfg.branch(o.branch_id).name }}</td>
-  <td><b>{{ o.cost_center.code }}</b> <span class="small">{{ o.cost_center.name }}</span></td>
+  <td>{{ o.cost_center.name }}</td>
   <td class="small">{{ o.effective_from or 'todo el ejercicio' }}{% if o.effective_to %} → {{ o.effective_to }}{% endif %}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='operation', entity_id=o.id) }}">
@@ -119,10 +119,8 @@ resultados no se suman entre sí.</p>
       <select name="branch_id" required>
         {% for b in cfg.branches %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
       </select></div>
-    <div style="flex:1"><label class="small">Código del centro de costo</label>
-      <input type="text" name="cost_center_code" placeholder="CC-101" required></div>
-    <div style="flex:1"><label class="small">Nombre (opcional)</label>
-      <input type="text" name="cost_center_name" placeholder="unidad / sucursal"></div>
+    <div style="flex:2"><label class="small">Centro de costo</label>
+      <input type="text" name="cost_center_name" placeholder="Repuestos Montevideo" required></div>
   </div>
   <div class="row" style="margin-top:8px">
     <div style="flex:1"><label class="small">Inicio (opcional)</label>
@@ -131,9 +129,9 @@ resultados no se suman entre sí.</p>
       <input type="date" name="effective_to"></div>
     <div style="flex:2;align-self:flex-end"><button>Crear operación</button></div>
   </div>
-  <p class="small" style="margin-top:8px">El código del centro de costo tiene que ser único en
+  <p class="small" style="margin-top:8px">El nombre del centro de costo tiene que ser único en
   toda la empresa: es la cuenta contra la que se registran los gastos propios de esta
-  combinación.</p>
+  combinación, y con eso alcanza para identificarlo.</p>
 </form>
 {% else %}
 <p class="small" style="color:var(--warn)">Necesitás al menos una unidad de negocio y una
@@ -146,13 +144,12 @@ sucursal para poder crear una operación.</p>
 <div class="panel">
 <p class="small">Administración, sistemas, dirección: no venden, pero gastan. Sus gastos y su
 nómina forman el pool corporativo que después se asigna a las operaciones por debajo del
-EBITDA propio.</p>
+EBITDA propio. Un área se crea junto con su centro de costo, porque sin él no tiene contra
+qué imputar nada.</p>
 <table><thead><tr><th>Área de soporte</th><th>Centros de costo</th><th></th></tr></thead><tbody>
 {% for s in cfg.support_units %}
 <tr><td><b>{{ s.name }}</b> <span class="small">{{ s.id }}</span></td>
-  <td class="small">
-    {% for c in s.cost_centers %}{{ c.code }} — {{ c.name }}{% if not loop.last %} · {% endif %}
-    {% else %}—{% endfor %}</td>
+  <td class="small">{{ s.cost_centers|map(attribute='name')|join(' · ') or '—' }}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='support_unit', entity_id=s.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
@@ -161,20 +158,25 @@ EBITDA propio.</p>
 {% endfor %}
 </tbody></table>
 {% if editable %}
-<div class="row" style="margin-top:14px">
-  <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='soporte') }}" class="row">
-    <input type="text" name="name" placeholder="Nueva área de soporte" required style="width:230px">
-    <button class="ghost">Agregar</button>
-  </form>
-  {% if cfg.support_units %}
-  <form method="post" action="{{ url_for('configurar_accion', step='estructura', action='centro') }}" class="row">
-    <select name="support_unit_id" style="width:auto">
-      {% for s in cfg.support_units %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
-    <input type="text" name="code" placeholder="Código" required style="width:110px">
-    <input type="text" name="name" placeholder="Centro de costo" required style="width:190px">
-    <button class="ghost">Agregar centro</button>
-  </form>
-  {% endif %}
-</div>
+<form method="post" action="{{ url_for('configurar_accion', step='estructura', action='soporte') }}"
+      class="row" style="margin-top:14px">
+  <div style="flex:1"><label class="small">Área de soporte</label>
+    <input type="text" name="name" placeholder="Administración central" required></div>
+  <div style="flex:1"><label class="small">Su centro de costo</label>
+    <input type="text" name="cost_center_name" placeholder="Administración" required></div>
+  <div style="align-self:flex-end"><button class="ghost">Agregar área</button></div>
+</form>
+{% if cfg.support_units %}
+<form method="post" action="{{ url_for('configurar_accion', step='estructura', action='centro') }}"
+      class="row" style="margin-top:10px">
+  <div style="flex:1"><label class="small">Otro centro de costo para un área existente</label>
+    <select name="support_unit_id">
+      {% for s in cfg.support_units %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+    </select></div>
+  <div style="flex:1"><label class="small">Centro de costo</label>
+    <input type="text" name="name" placeholder="Sistemas" required></div>
+  <div style="align-self:flex-end"><button class="ghost">Agregar centro</button></div>
+</form>
+{% endif %}
 {% endif %}
 </div>

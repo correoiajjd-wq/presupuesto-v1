@@ -12,7 +12,7 @@ modifica; los cambios estructurales requieren una nueva versión.</p>
   <table><tbody>
   {% for o in cfg.unit_operations(u.id) %}
   <tr><td>Opera en {{ cfg.branch(o.branch_id).name }}</td><td class="small">
-    centro de costo {{ o.cost_center.code }} ·
+    centro de costo {{ o.cost_center.name }} ·
     {{ 'desde ' ~ o.effective_from if o.effective_from else 'todo el ejercicio' }}</td></tr>
   {% endfor %}
   {% for p in u.products %}

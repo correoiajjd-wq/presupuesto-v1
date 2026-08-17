@@ -243,17 +243,18 @@ def _cost_center_ids(cfg: Configuration) -> list[str]:
             + [c.id for u in cfg.support_units for c in u.cost_centers])
 
 
-def _check_cost_center_code(cfg: Configuration, code: str) -> str:
-    code = (code or "").strip()
-    if not code:
+def _check_cost_center_name(cfg: Configuration, nombre: str, donde: str) -> str:
+    """El nombre del centro de costo es su identificación, y es único en toda
+    la empresa: no hace falta un código aparte."""
+    nombre = (nombre or "").strip()
+    if not nombre:
         raise BudgetError(
             "MISSING_COST_CENTER",
-            "Indicá el código del centro de costo: es donde se van a registrar los gastos "
-            "de esta combinación.")
-    if any(cc.code.strip().lower() == code.lower() for cc, _k, _l in cfg.cost_centers()):
-        raise BudgetError("DUPLICATE_COST_CENTER_CODE",
-                          f"ya existe un centro de costo con el código {code}")
-    return code
+            f"Indicá el centro de costo: es donde se van a registrar los gastos de {donde}.")
+    if any(cc.name.strip().lower() == nombre.lower() for cc, _k, _l in cfg.cost_centers()):
+        raise BudgetError("DUPLICATE_COST_CENTER_NAME",
+                          f"ya existe un centro de costo llamado {nombre}")
+    return nombre
 
 
 def add_operation(version, form) -> Operation:
@@ -276,13 +277,13 @@ def add_operation(version, form) -> Operation:
     if cfg.operation_for(unit_id, branch_id):
         raise BudgetError("DUPLICATE_OPERATION",
                           f"{unit.name} ya opera en {branch.name}.")
-    code = _check_cost_center_code(cfg, form.get("cost_center_code"))
-    nombre = (form.get("cost_center_name") or "").strip() or f"{unit.name} / {branch.name}"
+    nombre = _check_cost_center_name(cfg, form.get("cost_center_name"),
+                                     f"{unit.name} en {branch.name}")
     op = Operation(
         id=_next_id([o.id for o in cfg.operations], "OP"),
         business_unit_id=unit_id,
         branch_id=branch_id,
-        cost_center=CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), code=code, name=nombre),
+        cost_center=CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), name=nombre),
         effective_from=_opt_date(form.get("effective_from")),
         effective_to=_opt_date(form.get("effective_to")),
     )
@@ -292,10 +293,20 @@ def add_operation(version, form) -> Operation:
 
 
 def add_support_unit(version, form) -> SupportUnit:
+    """El área de soporte nace con su primer centro de costo.
+
+    Un área sin centro de costo no tiene contra qué imputar sus gastos, así que
+    no tiene sentido que exista en ese estado ni por un momento: las dos cosas
+    se piden en el mismo formulario.
+    """
     assert_open(version)
     cfg = version.configuration
+    nombre_area = _name(form)
+    nombre_cc = _check_cost_center_name(cfg, form.get("cost_center_name"), nombre_area)
     su = SupportUnit(id=_next_id([u.id for u in cfg.support_units], "SU"),
-                     name=_name(form),
+                     name=nombre_area,
+                     cost_centers=[CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"),
+                                              name=nombre_cc)],
                      effective_from=_opt_date(form.get("effective_from")),
                      effective_to=_opt_date(form.get("effective_to")))
     cfg.support_units.append(su)
@@ -304,11 +315,12 @@ def add_support_unit(version, form) -> SupportUnit:
 
 
 def add_cost_center(version, form) -> CostCenter:
+    """Centros de costo adicionales de un área que ya existe."""
     assert_open(version)
     cfg = version.configuration
     su = cfg.support_unit(form["support_unit_id"])
-    code = _check_cost_center_code(cfg, form.get("code"))
-    cc = CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), code=code, name=_name(form))
+    nombre = _check_cost_center_name(cfg, form.get("name"), su.name)
+    cc = CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), name=nombre)
     su.cost_centers.append(cc)
     version.invalidate()
     return cc
@@ -339,9 +351,20 @@ def add_product(version, form) -> Product:
     is_other = bool(form.get("is_other"))
     family_id = form["family_id"]
     margin_formula = MarginFormula(form.get("margin_formula", "PERCENTAGE_OF_SALES"))
+    # El código identifica al producto en toda la empresa: es lo que se escribe
+    # en las planillas de carga, donde no hay unidad ni familia que lo aclare.
+    codigo = _name(form, "code").upper()
+    repetido = next((p for u in cfg.business_units for p in u.products
+                     if p.code.strip().upper() == codigo), None)
+    if repetido is not None:
+        raise BudgetError(
+            "DUPLICATE_PRODUCT_CODE",
+            f"el código {codigo} ya lo usa el producto {repetido.name}. "
+            "Los códigos son únicos en toda la empresa, aunque estén en otra "
+            "familia o en otra unidad de negocio.")
     product = Product(
         id=_next_id([p.id for u in cfg.business_units for p in u.products], "P", 3),
-        code=_name(form, "code").upper(),
+        code=codigo,
         name=_name(form),
         family_id=family_id,
         sales_mode=SalesMode(form.get("sales_mode", "UNIT_BASED")),
@@ -373,10 +396,9 @@ def expense_target_options(cfg: Configuration) -> list[tuple[str, str, str]]:
     out += [(f"BUSINESS_UNIT:{u.id}", u.name, "Unidades de negocio") for u in cfg.business_units]
     out += [(f"BRANCH:{b.id}", b.name, "Sucursales") for b in cfg.branches]
     out += [(f"COST_CENTER:{o.cost_center.id}",
-             f"{cfg.operation_label(o.id)} ({o.cost_center.code})",
+             f"{o.cost_center.name} — {cfg.operation_label(o.id)}",
              "Centros de costo de operaciones") for o in cfg.operations]
-    out += [(f"COST_CENTER:{c.id}", f"{s.name} / {c.name} ({c.code})",
-             "Centros de costo de soporte")
+    out += [(f"COST_CENTER:{c.id}", f"{c.name} — {s.name}", "Centros de costo de soporte")
             for s in cfg.support_units for c in s.cost_centers]
     return out
 

@@ -53,7 +53,7 @@ class WizardCase(unittest.TestCase):
     def operacion(self, v, unit_id, branch_id, expect=200, **extra):
         """La combinación unidad x sucursal, que siempre trae su centro de costo."""
         data = {"business_unit_id": unit_id, "branch_id": branch_id,
-                "cost_center_code": f"CC{len(v.configuration.operations) + 1:03d}"}
+                "cost_center_name": f"Centro de costo {len(v.configuration.operations) + 1}"}
         data.update(extra)
         return self.paso("estructura", "operacion", data, expect)
 
@@ -83,10 +83,10 @@ class WizardCase(unittest.TestCase):
         unit = v.configuration.business_units[0]
         self.sucursal(v, "Casa central", unit.id)
         self.sucursal(v, "Sucursal Este", unit.id, effective_from="2028-07-01")
-        self.paso("estructura", "soporte", {"name": "Administración"})
+        self.paso("estructura", "soporte", {"name": "Administración",
+                                            "cost_center_name": "Administración central"})
         su = v.configuration.support_units[0]
-        self.paso("estructura", "centro", {"support_unit_id": su.id, "code": "900",
-                                           "name": "Contabilidad"})
+        self.paso("estructura", "centro", {"support_unit_id": su.id, "name": "Contabilidad"})
         sucursales = v.configuration.unit_branches(unit.id)
         self.assertEqual(len(sucursales), 2)
         self.assertEqual(sucursales[1].effective_from.month, 7)
@@ -367,9 +367,9 @@ class WizardCase(unittest.TestCase):
                          {retail.id, mayorista.id})
         self.assertEqual(len(cfg.operations), 4)
 
-        # cada operación tiene su centro de costo, y ningún código se repite
-        codigos = [o.cost_center.code for o in cfg.operations]
-        self.assertEqual(len(set(codigos)), 4)
+        # cada operación tiene su centro de costo, y ninguno se repite
+        centros = [o.cost_center.name for o in cfg.operations]
+        self.assertEqual(len(set(centros)), 4)
 
         # la misma combinación no se puede crear dos veces
         r = self.operacion(v, retail.id, centro.id)
@@ -393,22 +393,69 @@ class WizardCase(unittest.TestCase):
         cfg = v.configuration
         r = self.paso("estructura", "operacion",
                       {"business_unit_id": cfg.business_units[0].id,
-                       "branch_id": cfg.branches[0].id, "cost_center_code": ""})
+                       "branch_id": cfg.branches[0].id, "cost_center_name": ""})
         self.assertIn(b"MISSING_COST_CENTER", r.data)
         self.assertEqual(cfg.operations, [])
 
-    def test_no_se_repite_el_codigo_de_centro_de_costo(self):
+    def test_el_centro_de_costo_es_unico_en_toda_la_empresa(self):
+        """El nombre es la identificación del centro de costo: no se repite ni
+        entre operaciones, ni entre áreas de soporte, ni cruzado."""
         v = self.crear()
         self.unidad("Retail")
         cfg = v.configuration
         for nombre in ("Centro", "Norte"):
             self.paso("estructura", "sucursal", {"name": nombre})
         self.operacion(v, cfg.business_units[0].id, cfg.branches[0].id,
-                       cost_center_code="101")
+                       cost_center_name="Retail Centro")
+
+        # otra operación no puede repetirlo
         r = self.operacion(v, cfg.business_units[0].id, cfg.branches[1].id,
-                           cost_center_code="101")
-        self.assertIn(b"DUPLICATE_COST_CENTER_CODE", r.data)
+                           cost_center_name="retail centro")
+        self.assertIn(b"DUPLICATE_COST_CENTER_NAME", r.data)
         self.assertEqual(len(cfg.operations), 1)
+
+        # y un área de soporte tampoco, aunque sea otro tipo de dueño
+        r = self.paso("estructura", "soporte",
+                      {"name": "Administración", "cost_center_name": "Retail Centro"})
+        self.assertIn(b"DUPLICATE_COST_CENTER_NAME", r.data)
+        self.assertEqual(cfg.support_units, [])
+
+    def test_el_area_de_soporte_nace_con_su_centro_de_costo(self):
+        """No existe el estado intermedio de un área sin centro de costo."""
+        v = self.crear()
+        cfg = v.configuration
+        r = self.paso("estructura", "soporte", {"name": "Administración"})
+        self.assertIn(b"MISSING_COST_CENTER", r.data)
+        self.assertEqual(cfg.support_units, [])
+
+        self.paso("estructura", "soporte",
+                  {"name": "Administración", "cost_center_name": "Contabilidad"})
+        su = cfg.support_units[0]
+        self.assertEqual([c.name for c in su.cost_centers], ["Contabilidad"])
+
+        # después se le pueden agregar más
+        self.paso("estructura", "centro", {"support_unit_id": su.id, "name": "Sistemas"})
+        self.assertEqual([c.name for c in su.cost_centers], ["Contabilidad", "Sistemas"])
+
+    def test_el_codigo_de_producto_es_unico_en_toda_la_empresa(self):
+        """El código es lo que se escribe en la planilla de carga, donde no hay
+        unidad ni familia que lo desambigüe."""
+        v = self.crear()
+        self.unidad("Retail")
+        self.unidad("Mayorista")
+        retail, mayorista = v.configuration.business_units
+        for u in (retail, mayorista):
+            self.paso("productos", "familia", {"business_unit_id": u.id, "name": "General"})
+        self.paso("productos", "familia", {"business_unit_id": retail.id, "name": "Otra"})
+        self.producto(retail.id, "A001", "Harina", retail.families[0].id)
+
+        # el mismo código en otra familia de la misma unidad
+        r = self.producto(retail.id, "A001", "Otra cosa", retail.families[1].id)
+        self.assertIn(b"DUPLICATE_PRODUCT_CODE", r.data)
+        # y en otra unidad de negocio
+        r = self.producto(mayorista.id, "a001", "Harina mayorista", mayorista.families[0].id)
+        self.assertIn(b"DUPLICATE_PRODUCT_CODE", r.data)
+        self.assertEqual(len(retail.products) + len(mayorista.products), 1)
 
     def test_no_se_repite_el_nombre_de_una_sucursal(self):
         v = self.crear()
@@ -532,9 +579,9 @@ class BrowserDefaultsCase(unittest.TestCase):
         return self.client.post(f"/configurar/estructura/{action}", data=data,
                                 follow_redirects=True)
 
-    def operacion(self, unit_id, branch_id, code):
+    def operacion(self, unit_id, branch_id, nombre_cc):
         return self.post("operacion", {"business_unit_id": unit_id, "branch_id": branch_id,
-                                       "cost_center_code": code})
+                                       "cost_center_name": nombre_cc})
 
     def test_crear_una_operacion_no_toca_las_anteriores(self):
         """El caso que se rompió con la asignación: dar de alta la segunda
@@ -544,8 +591,8 @@ class BrowserDefaultsCase(unittest.TestCase):
         self.post("sucursal", {"name": "Centro"})
         self.post("sucursal", {"name": "Norte"})
         centro, norte = self.v.configuration.branches
-        self.operacion(unit.id, centro.id, "101")
-        self.operacion(unit.id, norte.id, "102")
+        self.operacion(unit.id, centro.id, "Retail Centro")
+        self.operacion(unit.id, norte.id, "Retail Norte")
         pares = lambda: [(o.business_unit_id, o.branch_id) for o in self.v.configuration.operations]
         self.assertEqual(pares(), [(unit.id, centro.id), (unit.id, norte.id)])
 
@@ -585,7 +632,7 @@ class BrowserDefaultsCase(unittest.TestCase):
         unit = self.v.configuration.business_units[0]
         self.post("sucursal", {"name": "Centro"})
         centro = self.v.configuration.branches[0]
-        self.operacion(unit.id, centro.id, "101")
+        self.operacion(unit.id, centro.id, "Retail Centro")
         self.assertEqual(len(self.v.configuration.operations), 1)
         self.client.post(f"/configurar/estructura/borrar/branch/{centro.id}",
                          follow_redirects=True)
@@ -610,9 +657,10 @@ class IdempotenciaCase(unittest.TestCase):
         return {
             "unidades": [u.id for u in cfg.business_units],
             "sucursales": [b.id for b in cfg.branches],
-            "operaciones": [(o.id, o.business_unit_id, o.branch_id, o.cost_center.code)
+            "operaciones": [(o.id, o.business_unit_id, o.branch_id, o.cost_center.name)
                             for o in cfg.operations],
-            "soporte": [(s.id, [c.id for c in s.cost_centers]) for s in cfg.support_units],
+            "soporte": [(s.id, [(c.id, c.name) for c in s.cost_centers])
+                        for s in cfg.support_units],
             "familias": [f.id for u in cfg.business_units for f in u.families],
             "productos": [(p.id, str(p.margin), str(p.commission_rate))
                           for u in cfg.business_units for p in u.products],

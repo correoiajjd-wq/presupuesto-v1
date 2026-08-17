@@ -118,6 +118,9 @@ Las que más costó dejar bien:
   cada producto, así que las tres fórmulas conviven en la misma unidad.
 - **El producto "Otros" es por familia, no por unidad.** Cada familia necesita su propio cajón
   para lo que no está en el catálogo; dos "Otros" en la misma familia se rechazan.
+- **El código de producto es único en toda la empresa.** No alcanza con que no se repita dentro
+  de la familia o de la unidad: es lo que se escribe en la planilla de carga, y ahí no hay nada
+  que lo desambigüe.
 - **Balance.** El total de patrimonio es calculado (`Activo − Pasivo`); los componentes
   (capital, resultados acumulados) se cargan, y si no coinciden con ese total el balance no
   cierra y **se rechaza la carga completa**. Es la única lectura de los §26 y §34 que no se
@@ -212,6 +215,9 @@ sesiones y entre varias personas, y cada paso dice de quién es:
 2. **Estructura** — sucursales y unidades de negocio se dan de alta por separado, cada una
    una sola vez; después se crea cada **operación** eligiendo unidad y sucursal de sendos
    selectores y dándole su **centro de costo**, que es donde se van a registrar sus gastos.
+   El nombre del centro de costo es único en toda la empresa —operaciones y áreas de soporte
+   comparten el mismo espacio de nombres—, así que no hace falta un código aparte. Un área de
+   soporte se da de alta junto con su centro de costo, en el mismo formulario.
    Una unidad puede operar en varias sucursales y una sucursal alojar varias unidades. Una
    sucursal donde no opera nadie, o una unidad que no opera en ningún lado, no genera cargas
    y no deja cerrar.
