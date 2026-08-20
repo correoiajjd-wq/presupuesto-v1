@@ -11,13 +11,13 @@ from decimal import Decimal
 
 from app.domain.config import (
     AllocationMode, ConfigStatus, ConfigurationError, ExpenseDefinition, ExpenseTarget,
-    ExpenseTargetType, MarginFormula, SalesMode,
+    ExpenseTargetType, MarginFormula, Role, SalesMode,
 )
 from app.domain.engine import (
     FY, BudgetEngine, scope_br, scope_bu, scope_co, scope_op, scope_stock,
 )
 from app.domain.graph import nk
-from app.domain.inputs import Concept, InputSet, InputValue
+from app.domain.inputs import ChangeType, Concept, InputSet, InputValue
 from app.domain.money import FXTable, Money
 from app.domain.periods import FiscalYear, Frequency, Period, spread
 from app.domain.ratios import RATIO_CATALOG
@@ -205,19 +205,18 @@ class TestPayroll(unittest.TestCase):
         self.values = self.version.calculate()
         self.cfg = self.version.configuration
 
-    def test_aumentos_segun_fecha_de_ingreso(self):
-        """Doc 01 §17: quien entra en febrero recibe marzo y agosto; quien entra
-        después de marzo, sólo agosto."""
+    def test_los_aumentos_rigen_desde_su_fecha(self):
+        """Doc 01 §17: en enero no hay aumentos; en abril rige el de marzo; en
+        diciembre, los dos. Nómina carga a valores de hoy y el sistema proyecta."""
         e = BudgetEngine(self.cfg, self.version.fx, self.version.inputs)
-        f_inicial = e._increase_factor(date(2027, 1, 1), Period(2027, 12))
-        f_abril = e._increase_factor(date(2027, 4, 1), Period(2027, 12))
-        self.assertEqual(f_inicial, D("1.05") * D("1.04"))
-        self.assertEqual(f_abril, D("1.04"))
+        self.assertEqual(e._increase_factor(Period(2027, 1)), D(1))
+        self.assertEqual(e._increase_factor(Period(2027, 4)), D("1.05"))
+        self.assertEqual(e._increase_factor(Period(2027, 12)), D("1.05") * D("1.04"))
 
-    def test_alta_en_febrero_recibe_ambos_aumentos(self):
-        e = BudgetEngine(self.cfg, self.version.fx, self.version.inputs)
-        self.assertEqual(e._increase_factor(date(2027, 2, 1), Period(2027, 12)),
-                         D("1.05") * D("1.04"))
+    def test_el_costo_laboral_sigue_a_los_aumentos(self):
+        enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
+        abril = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-04")
+        self.assertEqual(abril, enero * D("1.05"))
 
     def test_dotacion_altas_y_bajas(self):
         """Doc 02 §54: dotación inicial + altas - bajas = dotación final."""
@@ -233,10 +232,31 @@ class TestPayroll(unittest.TestCase):
                          ene + val(self.values, "HEADCOUNT", scope_op("OP-04"), "2027-01"))
 
     def test_costo_laboral_incluye_cargas(self):
-        """Doc 01 §18: los conceptos porcentuales se aplican automáticamente."""
+        """Doc 01 §18: los conceptos porcentuales se aplican automáticamente.
+
+        El costo sale del salario nominal que Nómina cargó contra el centro de
+        costo de esa operación, no de la dotación.
+        """
         enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
-        esperado = (D(5) * D(2500) + D(3) * D(1800)) * D("1.17")
-        self.assertEqual(enero, esperado)
+        self.assertEqual(enero, D(20_500) * D("1.17"))
+
+    def test_la_dotacion_no_calcula_plata(self):
+        """Agregar gente no mueve el costo laboral: ese número lo pone Nómina."""
+        antes = val(self.values, "PAYROLL_BASE", scope_op("OP-03"), "2027-06")
+        self.service.submit_input("u.payroll", self.version, InputValue(
+            concept=Concept.HEADCOUNT_CHANGE, value=D(10), change_type=ChangeType.HIRED,
+            effective_date=date(2027, 6, 1), operation_id="OP-03", area_id="AR-VEN"),
+            "budget.payroll.load")
+        despues = self.version.calculate(force=True)
+        self.assertEqual(val(despues, "PAYROLL_BASE", scope_op("OP-03"), "2027-06"), antes)
+        self.assertGreater(val(despues, "HEADCOUNT", scope_op("OP-03"), "2027-06"),
+                           val(self.values, "HEADCOUNT", scope_op("OP-03"), "2027-06"))
+
+    def test_el_salario_nominal_va_por_centro_de_costo(self):
+        """Cada centro de costo creado en la estructura tiene su valor de nómina."""
+        cargados = {iv.cost_center_id for iv in self.version.inputs.values
+                    if iv.concept is Concept.NOMINAL_SALARY}
+        self.assertEqual(cargados, {cc.id for cc, _k, _l in self.cfg.cost_centers()})
 
     def test_comisiones_se_calculan_desde_ventas(self):
         """Doc 01 §19: Ventas -> Nómina -> comisión.
@@ -529,6 +549,62 @@ class TestGovernance(unittest.TestCase):
         with self.assertRaises(BudgetError) as ctx:
             self.service.approve_version("u.cfo", self.version)
         self.assertIn(ctx.exception.code, ("PENDING_APPROVALS", "VERSION_NOT_READY"))
+
+
+class TestResponsables(unittest.TestCase):
+    """Cada centro de costo tiene quién carga sus valores, y Nómina los cubre a todos."""
+
+    def test_el_perfil_del_centro_de_costo_es_quien_carga_sus_gastos(self):
+        service, budget, version = bootstrap(load_inputs=False, close_config=False)
+        cfg = version.configuration
+        cfg.support_units[0].cost_centers[0].responsible_role = Role.FINANCE_AREA
+        service.close_configuration("u.cfo", version)
+
+        propia = next(t for t in version.tasks.values()
+                      if t.concept == "EXPENSES" and t.scope_key == "CC:CC-01")
+        self.assertEqual(propia.loader_role, Role.FINANCE_AREA)
+        # la tarea general de gastos sigue el rol del workflow
+        general = next(t for t in version.tasks.values()
+                       if t.concept == "EXPENSES" and t.scope_key == "CO")
+        self.assertEqual(general.loader_role, Role.ADMIN_AREA)
+
+    def test_un_gasto_pertenece_a_la_tarea_de_su_centro_de_costo(self):
+        service, budget, version = bootstrap()
+        propia = next(t for t in version.tasks.values()
+                      if t.concept == "EXPENSES" and t.scope_key == "CC:CC-01")
+        general = next(t for t in version.tasks.values()
+                       if t.concept == "EXPENSES" and t.scope_key == "CO")
+        self.assertIs(version.task_for("EXPENSES", "CC:CC-01"), propia)
+        # y por eso no queda además dentro de la general
+        de_la_general = {iv.scope_key for iv in version.inputs_of(general)}
+        self.assertNotIn("CC:CC-01", de_la_general)
+        self.assertTrue(version.inputs_of(propia))
+
+    def test_nomina_carga_todos_los_centros_de_costo(self):
+        """Doc 01 §16: los centros salen de la estructura, no de una lista aparte."""
+        from app.web.forms import build_form
+
+        service, budget, version = bootstrap()
+        cfg = version.configuration
+        task = next(t for t in version.tasks.values() if t.concept == "PAYROLL_SALARY")
+        self.assertEqual(task.loader_role, Role.PAYROLL_AREA)
+        spec = build_form(version, task)
+        self.assertEqual([r.label for r in spec.rows],
+                         [cc.name for cc, _k, _l in cfg.cost_centers()])
+        self.assertEqual(len(cfg.cost_centers()), len(cfg.operations) + 1)
+
+    def test_agregar_una_operacion_agrega_su_centro_a_nomina(self):
+        from app.domain.config import CostCenter, Operation
+        from app.web.forms import build_form
+
+        service, budget, version = bootstrap(load_inputs=False, close_config=False)
+        cfg = version.configuration
+        cfg.operations.append(Operation(
+            id="OP-99", business_unit_id="BU-02", branch_id="BR-02",
+            cost_center=CostCenter(id="CC-199", name="Servicios Salto")))
+        service.close_configuration("u.cfo", version)
+        task = next(t for t in version.tasks.values() if t.concept == "PAYROLL_SALARY")
+        self.assertIn("Servicios Salto", [r.label for r in build_form(version, task).rows])
 
 
 class TestDependencyGraph(unittest.TestCase):

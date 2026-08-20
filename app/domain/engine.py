@@ -234,15 +234,51 @@ class BudgetEngine:
             out[k].sort(key=lambda t: t[0])
         return out
 
-    def _increase_factor(self, entry: date, period: Period) -> Decimal:
-        """Doc 01 §17: sólo aplican los aumentos posteriores al ingreso."""
+    def _increase_factor(self, period: Period) -> Decimal:
+        """Doc 01 §17: los aumentos rigen desde su fecha.
+
+        Nómina carga el salario nominal a valores de hoy; los aumentos del
+        ejercicio son un supuesto del modelo, no algo que el que carga tenga
+        que calcular a mano.
+        """
         factor = Decimal(1)
         for rule in self.cfg.payroll.increase_rules:
-            if rule.effective_date >= entry and rule.effective_date <= period.last_day:
+            if rule.effective_date <= period.last_day:
                 factor *= (Decimal(1) + rule.percentage)
         return factor
 
+    def _headcount(self, scope_key: str, period: Period,
+                   cohorts: dict, terms: dict) -> Decimal:
+        """Dotación vigente: inicial + altas - bajas, hasta el fin del período.
+
+        Las bajas consumen primero las cohortes más antiguas. No calcula plata:
+        el costo laboral lo pone Nómina como salario nominal del centro de costo.
+        """
+        total = ZERO
+        for (sk, area_id), chs in cohorts.items():
+            if sk != scope_key:
+                continue
+            remaining = [[entry, q] for entry, q in chs if entry <= period.last_day]
+            for t_date, t_qty in terms.get((sk, area_id), []):
+                if t_date > period.last_day:
+                    continue
+                left = t_qty
+                for row in remaining:
+                    if left <= 0:
+                        break
+                    take = min(row[1], left)
+                    row[1] -= take
+                    left -= take
+            total += sum((q for _entry, q in remaining if q > 0), ZERO)
+        return total
+
     def _build_payroll(self) -> None:
+        """Doc 01 §16: las unidades informan personas, Nómina pone los valores.
+
+        El costo laboral de un ámbito sale del salario nominal total que Nómina
+        cargó contra su centro de costo, con los aumentos del ejercicio y los
+        conceptos porcentuales aplicados encima.
+        """
         cfg = self.cfg
         cohorts = self._payroll_cohorts()
         terms = self._terminations()
@@ -257,8 +293,27 @@ class BudgetEngine:
                     f"INVALID_PAYROLL_SCOPE: dotación cargada en {scope_key}, "
                     "que no es una operación ni un área de soporte; se ignora")
 
+        # Salario nominal por centro de costo, expandido a mensual y convertido.
+        nominal: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        for iv in self.inputs.of(Concept.NOMINAL_SALARY):
+            if not iv.cost_center_id:
+                self.missing.append(
+                    "INVALID_PAYROLL_SCOPE: salario nominal cargado sin centro de costo")
+                continue
+            lp = Period.parse(iv.period)
+            for p, v in self._expand(iv.value, lp, cfg.payroll.frequency).items():
+                nominal[iv.cost_center_id][p] += self._to_pres(
+                    v, iv.currency or cfg.payroll.currency, p)
+
+        # Qué centros de costo aportan a cada ámbito.
+        centros: dict[str, list[str]] = defaultdict(list)
+        for o in cfg.operations:
+            centros[scope_op(o.id)].append(o.cost_center.id)
+        for su in cfg.support_units:
+            centros[scope_su(su.id)] += [cc.id for cc in su.cost_centers]
+
         # Comisiones como % de ventas (doc 01 §19). La tasa es de cada producto:
-        # dentro de una misma sucursal, unos comisionan y otros no.
+        # dentro de una misma operación, unos comisionan y otros no.
         commission_products: dict[str, list[tuple[str, Decimal]]] = {}
         for op in cfg.operations:
             unit = cfg.unit(op.business_unit_id)
@@ -277,35 +332,15 @@ class BudgetEngine:
 
         for scope_key in sorted(scopes):
             for p in self.periods:
-                head = ZERO
-                cost = ZERO
-                for (sk, area_id), chs in cohorts.items():
-                    if sk != scope_key:
-                        continue
-                    area = cfg.payroll.area(area_id)
-                    remaining = [[entry, q] for entry, q in chs if entry <= p.last_day]
-                    # bajas FIFO sobre las cohortes más antiguas
-                    for t_date, t_qty in terms.get((sk, area_id), []):
-                        if t_date > p.last_day:
-                            continue
-                        left = t_qty
-                        for row in remaining:
-                            if left <= 0:
-                                break
-                            take = min(row[1], left)
-                            row[1] -= take
-                            left -= take
-                    for entry, q in remaining:
-                        if q <= 0:
-                            continue
-                        salary = area.base_salary * self._increase_factor(entry, p)
-                        cost += self._to_pres(q * salary * charges, area.currency, p)
-                        head += q
+                head = self._headcount(scope_key, p, cohorts, terms)
+                bruto = sum((nominal[cc].get(p, ZERO) for cc in centros[scope_key]), ZERO)
+                cost = bruto * self._increase_factor(p) * charges
 
                 self.g.constant(nk("HEADCOUNT", scope_key, p.code), head, kind="INPUT",
                                 formula="dotación vigente en el período")
                 self.g.constant(nk("PAYROLL_BASE", scope_key, p.code), cost, kind="INPUT",
-                                formula="dotación x sueldo con aumentos x (1 + cargas)")
+                                formula="salario nominal del centro de costo x aumentos "
+                                        "vigentes x (1 + cargas)")
 
                 # comisiones
                 comm_key = nk("COMMISSION", scope_key, p.code)

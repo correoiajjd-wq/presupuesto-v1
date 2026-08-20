@@ -109,7 +109,7 @@ class WizardCase(unittest.TestCase):
         self.assertEqual(len(v.configuration.expenses), 2)
 
         # ---- nómina
-        self.paso("nomina", "area", {"name": "Ventas", "base_salary": "2000", "currency": "USD"})
+        self.paso("nomina", "area", {"name": "Ventas"})
         self.paso("nomina", "aumento", {"effective_date": "2028-04-01", "percentage": "6"})
         self.paso("nomina", "concepto", {"concept": "Cargas sociales", "percentage": "15"})
         self.assertEqual(float(v.configuration.payroll.charges_factor), 1.15)
@@ -137,7 +137,7 @@ class WizardCase(unittest.TestCase):
 
         # ---- workflow
         self.paso("workflow", "workflow_default", {})
-        self.assertEqual(len(v.configuration.workflow.steps), 6)
+        self.assertEqual(len(v.configuration.workflow.steps), 7)
 
         # ---- cierre
         r = self.client.post("/configurar/cerrar", follow_redirects=True)
@@ -269,15 +269,17 @@ class WizardCase(unittest.TestCase):
         self.paso("gastos", "gasto", {
             "name": "Alquiler", "target": [f"BRANCH:{central.id}", f"BRANCH:{norte.id}"],
             "currency": "USD", "frequency": "MONTHLY", "responsible_role": "ADMIN_AREA"})
-        self.paso("nomina", "area", {"name": "Ventas", "base_salary": "2200", "currency": "USD"})
+        self.paso("nomina", "area", {"name": "Ventas"})
         self.paso("nomina", "concepto", {"concept": "Cargas", "percentage": "18"})
         self.paso("ratios", "ratios", {"ratio": ["GROSS_MARGIN_PCT", "EBITDA_MARGIN_PCT"]})
         self.paso("workflow", "workflow_default", {})
 
         self.paso("workflow", "usuario", {
-            "name": "Marcos Gerente", "role": ["UNIT_MANAGER", "PAYROLL_AREA"],
+            "name": "Marcos Gerente", "role": ["UNIT_MANAGER"],
             "scope": [f"BR:{central.id}"]})
         self.paso("workflow", "usuario", {"name": "Elena Admin", "role": ["ADMIN_AREA"],
+                                          "scope": []})
+        self.paso("workflow", "usuario", {"name": "Nadia Nomina", "role": ["PAYROLL_AREA"],
                                           "scope": []})
         self.assertIn("u.marcos", self.service.users)
         self.assertEqual(self.service.users["u.marcos"].scopes, {f"BR:{central.id}"})
@@ -315,25 +317,41 @@ class WizardCase(unittest.TestCase):
                          follow_redirects=True)
         self.assertIn(b"UNAUTHORIZED_SCOPE", r.data)
 
+        # los gastos de cada sucursal son su propia tarea
         admin = create_web_app(self.service, self.budget.id).test_client()
         admin.post("/login", data={"user_id": "u.elena"})
         admin.post("/versiones/seleccionar", data={"version_id": v.id})
-        t_gastos = next(t for t in v.tasks.values() if t.concept == "EXPENSES")
         exp = v.configuration.expenses[0].id
         p0 = v.configuration.periods[0].code
-        admin.post(f"/tareas/{t_gastos.id}",
-                   data={f"E~{exp}~BR:{central.id}~{p0}": "3000",
-                         f"E~{exp}~BR:{norte.id}~{p0}": "0"},
-                   follow_redirects=True)
+        for sucursal, importe in ((central, "3000"), (norte, "0")):
+            t_gastos = next(t for t in v.tasks.values()
+                            if t.concept == "EXPENSES" and t.scope_key == f"BR:{sucursal.id}")
+            admin.post(f"/tareas/{t_gastos.id}",
+                       data={f"E~{exp}~BR:{sucursal.id}~{p0}": importe},
+                       follow_redirects=True)
+
+        # Nómina pone el valor de cada centro de costo
+        nomina = create_web_app(self.service, self.budget.id).test_client()
+        nomina.post("/login", data={"user_id": "u.nadia"})
+        nomina.post("/versiones/seleccionar", data={"version_id": v.id})
+        t_sal = next(t for t in v.tasks.values() if t.concept == "PAYROLL_SALARY")
+        centros = [cc for cc, _k, _l in v.configuration.cost_centers()]
+        self.assertEqual(len(centros), 2)          # una operación por sucursal
+        nomina.post(f"/tareas/{t_sal.id}",
+                    data={f"N~{cc.id}~{p0}": "8800" if i == 0 else "0"
+                          for i, cc in enumerate(centros)},
+                    follow_redirects=True)
 
         # el motor ya calcula sobre el modelo que se armó a mano
         vals = v.calculate()
         self.assertEqual(vals[nk("SALES", "CO", p0)], D(22000))          # 1000x20 + 200x10
         self.assertEqual(vals[nk("COGS", "CO", p0)], D(16640))           # 20000x0.75 + 2000x0.82
-        self.assertEqual(vals[nk("PAYROLL", "CO", p0)], D(10384))        # 4 x 2200 x 1.18
+        self.assertEqual(vals[nk("PAYROLL", "CO", p0)], D(10384))        # 8800 x 1.18
         self.assertEqual(vals[nk("EXPENSES", "CO", p0)], D(3000))
         self.assertEqual(vals[nk("EBITDA", "CO", p0)],
                          D(22000) - D(16640) - D(3000) - D(10384))
+        # y la dotación que informó el gerente sigue estando, sin calcular plata
+        self.assertEqual(vals[nk("HEADCOUNT", "CO", p0)], D(4))
 
     def test_un_gerente_no_ve_el_wizard(self):
         gerente = create_web_app(self.service, self.budget.id).test_client()
@@ -665,7 +683,8 @@ class IdempotenciaCase(unittest.TestCase):
             "productos": [(p.id, str(p.margin), str(p.commission_rate))
                           for u in cfg.business_units for p in u.products],
             "gastos": [(e.id, [t.scope_key for t in e.targets]) for e in cfg.expenses],
-            "nomina": [(a.id, str(a.base_salary)) for a in cfg.payroll.areas],
+            "nomina": [a.id for a in cfg.payroll.areas],
+            "nomina_carga": (cfg.payroll.currency, cfg.payroll.frequency.value),
             "aumentos": [str(r.effective_date) for r in cfg.payroll.increase_rules],
             "ratios": [(r.ratio_code, str(r.objective.value) if r.objective else None)
                        for r in cfg.ratios],

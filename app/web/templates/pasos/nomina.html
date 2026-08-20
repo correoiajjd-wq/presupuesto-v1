@@ -1,30 +1,68 @@
-<h3>Áreas y sueldo base</h3>
+<h3>1. Cómo se carga el costo laboral</h3>
 <div class="panel">
-<table><thead><tr><th>Área</th><th>Sueldo base</th><th></th></tr></thead><tbody>
+<p class="small">Nómina carga el salario nominal total de cada centro de costo, a valores de
+hoy. El sistema le aplica los aumentos del ejercicio y los conceptos porcentuales. Las
+unidades informan la dotación aparte: personas, no plata.</p>
+{% if editable %}
+<form method="post" action="{{ url_for('configurar_accion', step='nomina', action='nomina') }}"
+      class="row">
+  <div style="flex:1"><label class="small">Moneda del salario nominal</label>
+    <select name="currency">
+      {% for c in cfg.enabled_currencies %}
+      <option value="{{ c }}" {{ 'selected' if cfg.payroll.currency == c }}>{{ c }}</option>
+      {% endfor %}</select></div>
+  <div style="flex:1"><label class="small">Frecuencia de carga</label>
+    <select name="frequency">
+      {% for f in ['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'] %}
+      <option value="{{ f }}" {{ 'selected' if cfg.payroll.frequency.value == f }}>{{ f|lower }}</option>
+      {% endfor %}</select></div>
+  <div style="align-self:flex-end"><button class="ghost">Guardar</button></div>
+</form>
+{% endif %}
+</div>
+
+<h3>2. Centros de costo que va a cargar Nómina</h3>
+<div class="panel">
+<p class="small">Salen de la estructura: uno por cada combinación unidad × sucursal y los de
+cada área de soporte. No se definen acá — si falta alguno, se crea en el paso 2.</p>
+<table><thead><tr><th>Centro de costo</th><th>Ámbito</th><th>Responsable de sus gastos</th></tr></thead>
+<tbody>
+{% for cc, kind, label in cfg.cost_centers() %}
+<tr><td><b>{{ cc.name }}</b></td>
+  <td class="small">{{ 'Operación' if kind == 'OPERATION' else 'Soporte' }} · {{ label }}</td>
+  <td class="small">{{ cc.responsible_role.value }}</td></tr>
+{% else %}
+<tr><td colspan="3" class="small">Todavía no hay centros de costo: creá operaciones o áreas de
+  soporte en el paso 2.</td></tr>
+{% endfor %}
+</tbody></table>
+</div>
+
+<h3>3. Áreas de dotación</h3>
+<div class="panel">
+<p class="small">Sirven para que las unidades informen cuánta gente hay de cada tipo. No llevan
+sueldo: el costo sale del salario nominal del centro de costo.</p>
+<table><thead><tr><th>Área</th><th></th></tr></thead><tbody>
 {% for a in cfg.payroll.areas %}
 <tr><td>{{ a.name }} <span class="small">{{ a.id }}</span></td>
-  <td>{{ a.base_salary }} {{ a.currency }}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='nomina', kind='payroll_area', entity_id=a.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
 {% else %}
-<tr><td colspan="3" class="small">Sin áreas. Las unidades informan personas por área; el valor
-  salarial sale de acá.</td></tr>
+<tr><td colspan="2" class="small">Sin áreas. Sin al menos una, las unidades no tienen cómo
+  informar la dotación.</td></tr>
 {% endfor %}
 </tbody></table>
 {% if editable %}
 <form method="post" action="{{ url_for('configurar_accion', step='nomina', action='area') }}"
       class="row" style="margin-top:12px">
   <input type="text" name="name" placeholder="Área (Ventas, Taller...)" required style="width:220px">
-  <input type="number" step="any" name="base_salary" placeholder="Sueldo base" required style="width:150px">
-  <select name="currency" style="width:auto">
-    {% for c in cfg.enabled_currencies %}<option>{{ c }}</option>{% endfor %}</select>
   <button class="ghost">Agregar área</button>
 </form>
 {% endif %}
 </div>
 
-<h3>Reglas de aumento</h3>
+<h3>4. Reglas de aumento</h3>
 <div class="panel">
 <table><thead><tr><th>Fecha</th><th>Aumento</th><th></th></tr></thead><tbody>
 {% for r in cfg.payroll.increase_rules %}
@@ -45,12 +83,11 @@
   <button class="ghost">Agregar aumento</button>
 </form>
 {% endif %}
-<p class="small">Cada aumento aplica sólo a quienes ya estaban o entraron antes de esa fecha:
-quien ingresa en abril no recibe el aumento de marzo, pero sí el de agosto. El sistema lo
-calcula solo a partir de la fecha de alta.</p>
+<p class="small">El aumento rige desde su fecha y se aplica sobre el salario nominal cargado.
+Por eso Nómina carga valores de hoy: la proyección la hace el sistema, no quien carga.</p>
 </div>
 
-<h3>Conceptos porcentuales sobre el sueldo</h3>
+<h3>5. Conceptos porcentuales sobre el sueldo</h3>
 <div class="panel">
 <table><thead><tr><th>Concepto</th><th>%</th><th></th></tr></thead><tbody>
 {% for c in cfg.payroll.percentage_concepts %}
@@ -61,7 +98,7 @@ calcula solo a partir de la fecha de alta.</p>
 {% else %}
 <tr><td colspan="3" class="small">Sin cargas ni beneficios configurados.</td></tr>
 {% endfor %}
-<tr class="total"><td>Costo laboral = sueldo x</td><td>{{ cfg.payroll.charges_factor|round(4) }}</td><td></td></tr>
+<tr class="total"><td>Costo laboral = nominal x</td><td>{{ cfg.payroll.charges_factor|round(4) }}</td><td></td></tr>
 </tbody></table>
 {% if editable %}
 <form method="post" action="{{ url_for('configurar_accion', step='nomina', action='concepto') }}"

@@ -19,6 +19,7 @@ class Concept(str, Enum):
     EXPENSE_AMOUNT = "EXPENSE_AMOUNT"
     INITIAL_HEADCOUNT = "INITIAL_HEADCOUNT"
     HEADCOUNT_CHANGE = "HEADCOUNT_CHANGE"
+    NOMINAL_SALARY = "NOMINAL_SALARY"        # total del centro de costo, lo pone Nómina
     COMMISSION_AMOUNT = "COMMISSION_AMOUNT"
     CAPEX_AMOUNT = "CAPEX_AMOUNT"
     OPENING_STOCK = "OPENING_STOCK"
@@ -34,10 +35,13 @@ CONCEPT_GROUP: dict[Concept, str] = {
     Concept.EXPENSE_AMOUNT: "EXPENSES",
     Concept.INITIAL_HEADCOUNT: "PAYROLL_HEADCOUNT",
     Concept.HEADCOUNT_CHANGE: "PAYROLL_HEADCOUNT",
-    Concept.COMMISSION_AMOUNT: "PAYROLL_HEADCOUNT",
+    Concept.COMMISSION_AMOUNT: "PAYROLL_SALARY",
+    Concept.NOMINAL_SALARY: "PAYROLL_SALARY",
     Concept.CAPEX_AMOUNT: "CAPEX",
+    # El stock inicial y las compras se cargan juntos, en la misma pantalla y
+    # por el mismo responsable: son un solo concepto de carga.
     Concept.OPENING_STOCK: "OPENING_STOCK",
-    Concept.PURCHASES: "PURCHASES",
+    Concept.PURCHASES: "OPENING_STOCK",
     Concept.BALANCE_OPENING: "BALANCE",
     Concept.BALANCE_PROJECTED: "BALANCE",
 }

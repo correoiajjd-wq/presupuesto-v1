@@ -78,9 +78,11 @@ def build_form(version, task) -> FormSpec:
     if task.concept == "SALES":
         return _sales_form(cfg, version, task)
     if task.concept == "EXPENSES":
-        return _expenses_form(cfg, version)
+        return _expenses_form(cfg, version, task)
     if task.concept == "PAYROLL_HEADCOUNT":
         return _payroll_form(cfg, version, task)
+    if task.concept == "PAYROLL_SALARY":
+        return _salary_form(cfg, version)
     if task.concept == "CAPEX":
         return _capex_form(cfg, version)
     if task.concept == "OPENING_STOCK":
@@ -130,13 +132,19 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
         ["Producto", "Período"], rows, "budget.sales.load")
 
 
-def _expenses_form(cfg: Configuration, version) -> FormSpec:
+def _expenses_form(cfg: Configuration, version, task) -> FormSpec:
+    """Cada quien carga los gastos del ámbito que tiene asignado.
+
+    Un centro de costo con responsable propio es su propia tarea: el que carga
+    ve sus conceptos y nada más.
+    """
     fy = cfg.fiscal_year
     current = _index(version, Concept.EXPENSE_AMOUNT)
     rows: list[Row] = []
     for ed in cfg.expenses:
         per_target = ed.allocation_mode is AllocationMode.PER_TARGET
-        scopes = [t.scope_key for t in ed.targets] if per_target else ["CO"]
+        todos = [t.scope_key for t in ed.targets] if per_target else ["CO"]
+        scopes = [sc for sc in todos if sc == task.scope_key]
         for head, _ in fy.iter_buckets(ed.frequency):
             for scope in scopes:
                 key = SEP.join([scope, "", ed.id, "", "", "", head.code])
@@ -149,10 +157,10 @@ def _expenses_form(cfg: Configuration, version) -> FormSpec:
                                    label="Importe", value=_fmt(current.get(key)),
                                    currency=ed.currency)]))
     return FormSpec(
-        "Gastos",
+        f"Gastos — {cfg.scope_label(task.scope_key)}",
         "El nivel de imputación, la moneda y la frecuencia los define el CFO; acá sólo se "
-        "carga el importe. Un mismo gasto puede tener varios destinos: donde no corresponde, "
-        "se carga 0.",
+        "carga el importe. Un mismo gasto puede existir en varios lugares con montos "
+        "distintos: donde no corresponde, se carga 0.",
         ["Gasto y destino", "Período"], rows, "budget.expense.load")
 
 
@@ -164,20 +172,49 @@ def _payroll_form(cfg: Configuration, version, task) -> FormSpec:
         key = SEP.join([scope, "", "", "", area.id, "", ""])
         rows.append(Row(
             label=area.name,
-            detail=f"sueldo base {area.base_salary} {area.currency} · "
-                   f"cargas {((cfg.payroll.charges_factor - 1) * 100):.0f}%",
+            detail="personas de esta área en este ámbito",
             fields=[Field_(name=SEP.join(["H", area.id]), label="Dotación inicial",
                            value=_fmt(current.get(key)), currency="personas")]))
     movements = [iv for iv in version.inputs.values
                  if iv.concept is Concept.HEADCOUNT_CHANGE and iv.scope_key == scope]
     return FormSpec(
         task.label,
-        "Las unidades informan cantidad, área y fecha estimada. El valor salarial lo define "
-        "Nómina en la configuración; el sistema calcula el costo aplicando los aumentos que "
-        "correspondan según la fecha de ingreso de cada persona.",
-        ["Área"], rows, "budget.payroll.load",
+        "Las unidades informan cantidad, área y fecha estimada. Acá no se carga plata: el "
+        "costo laboral lo pone Nómina como salario nominal de cada centro de costo. La "
+        "dotación alimenta el reporte de personas y los ratios por empleado.",
+        ["Área"], rows, "budget.headcount.load",
         extra={"movements": movements, "areas": cfg.payroll.areas,
                "fy_start": cfg.fiscal_year_start, "fy_end": cfg.fiscal_year_end})
+
+
+def _salary_form(cfg: Configuration, version) -> FormSpec:
+    """Doc 01 §16: Nómina pone los valores, y los pone por centro de costo.
+
+    Los centros de costo son los que se crearon en la estructura: uno por cada
+    combinación unidad x sucursal y los de cada área de soporte.
+    """
+    fy = cfg.fiscal_year
+    current = _index(version, Concept.NOMINAL_SALARY)
+    rows: list[Row] = []
+    for cc, kind, label in cfg.cost_centers():
+        fields = []
+        for head, _ in fy.iter_buckets(cfg.payroll.frequency):
+            key = SEP.join([f"CC:{cc.id}", "", "", "", "", "", head.code])
+            fields.append(Field_(name=SEP.join(["N", cc.id, head.code]),
+                                 label=f"Nominal {head.code}",
+                                 value=_fmt(current.get(key)),
+                                 currency=cfg.payroll.currency))
+        detalle = ("operación" if kind == "OPERATION" else "área de soporte") + f" · {label}"
+        rows.append(Row(label=cc.name, detail=detalle, fields=fields))
+    aumentos = " · ".join(f"{r.effective_date:%d/%m} +{r.percentage * 100:.0f}%"
+                          for r in cfg.payroll.increase_rules) or "sin aumentos configurados"
+    return FormSpec(
+        "Nómina — salario nominal por centro de costo",
+        f"Se carga el salario nominal total de cada centro de costo, a valores de hoy y en "
+        f"{cfg.payroll.currency}. El sistema le aplica las cargas "
+        f"({((cfg.payroll.charges_factor - 1) * 100):.0f}%) y los aumentos del ejercicio "
+        f"({aumentos}). Donde no hay gente, se carga 0.",
+        ["Centro de costo", "Ámbito"], rows, "budget.payroll.load")
 
 
 def _capex_form(cfg: Configuration, version) -> FormSpec:
@@ -299,6 +336,11 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
                             value=value, currency=ed.currency, expense_id=ed.id)
             _set_scope(iv, parts[2], cfg)
             pending.append(iv)
+        elif parts[0] == "N":
+            iv = InputValue(concept=Concept.NOMINAL_SALARY, value=value, period=parts[2],
+                            currency=cfg.payroll.currency)
+            _set_scope(iv, f"CC:{parts[1]}", cfg)
+            pending.append(iv)
         elif parts[0] == "H":
             iv = InputValue(concept=Concept.INITIAL_HEADCOUNT, value=value, area_id=parts[1])
             _set_scope(iv, task.scope_key, cfg)
@@ -351,7 +393,7 @@ def add_headcount_change(service, actor: str, version, task, form) -> None:
         effective_date=_date.fromisoformat(form["effective_date"]),
         area_id=form["area_id"])
     _set_scope(iv, task.scope_key, version.configuration)
-    service.submit_input(actor, version, iv, "budget.payroll.load")
+    service.submit_input(actor, version, iv, "budget.headcount.load")
 
 
 def add_capex(service, actor: str, version, form) -> None:

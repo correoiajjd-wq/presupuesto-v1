@@ -137,6 +137,28 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
                     f"el período de carga debe ser {head.code}",
                     Severity.BLOCKING, tag))
 
+        if iv.concept is Concept.NOMINAL_SALARY:
+            if not iv.cost_center_id:
+                out.append(Finding("INVALID_PAYROLL_SCOPE",
+                                   f"{tag}: el salario nominal se carga contra un centro "
+                                   "de costo", Severity.BLOCKING, tag))
+            else:
+                try:
+                    cfg.cost_center(iv.cost_center_id)
+                except Exception as exc:
+                    out.append(Finding("INVALID_COST_CENTER", f"{tag}: {exc}",
+                                       Severity.BLOCKING, tag))
+            head = fy.bucket_head(Period.parse(iv.period), cfg.payroll.frequency)
+            if Period.parse(iv.period) != head:
+                out.append(Finding(
+                    "INVALID_FREQUENCY",
+                    f"{tag}: la nómina se carga con frecuencia "
+                    f"{cfg.payroll.frequency.value}; el período de carga debe ser {head.code}",
+                    Severity.BLOCKING, tag))
+            if iv.value < 0:
+                out.append(Finding("INVALID_VALUE", f"{tag}: valor negativo",
+                                   Severity.BLOCKING, tag))
+
         if iv.concept in (Concept.OPENING_STOCK, Concept.PURCHASES):
             if not cfg.inventory.enabled:
                 out.append(Finding("MODULE_NOT_CONFIGURED",
@@ -211,6 +233,18 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                             "MISSING_REQUIRED_INPUT",
                             f"Gastos: falta {ed.name}{detalle} para {head.code}",
                             Severity.BLOCKING, f"EXP:{ed.id}"))
+
+    if "PAYROLL_SALARY" in required:
+        # Nómina pone el valor de cada centro de costo; donde no hay gente, 0.
+        for cc, _kind, label in cfg.cost_centers():
+            for head, _ in fy.iter_buckets(cfg.payroll.frequency):
+                if not any(iv.concept is Concept.NOMINAL_SALARY
+                           and iv.cost_center_id == cc.id and iv.period == head.code
+                           for iv in inputs.values):
+                    out.append(Finding(
+                        "MISSING_REQUIRED_INPUT",
+                        f"Nómina: falta el salario nominal de {label} para {head.code}",
+                        Severity.BLOCKING, f"CC:{cc.id}"))
 
     if "OPENING_STOCK" in required and cfg.inventory.enabled:
         levels = {
@@ -319,6 +353,10 @@ def collect_assumptions(cfg: Configuration) -> list[str]:
     """Doc 02 §41: los reportes deben explicitar los supuestos utilizados."""
     out = [
         "Precio y margen constantes durante el ejercicio (V1).",
+        "El costo laboral sale del salario nominal que Nómina carga por centro de costo, "
+        "a valores de hoy; los aumentos configurados se aplican sobre ese total desde su "
+        "fecha de vigencia. La dotación se informa aparte y no calcula costo: alimenta el "
+        "reporte de personas y los ratios por empleado.",
         "Los valores cargados con frecuencia menor a la mensual se distribuyen en partes iguales.",
         "Los flujos se convierten con el TC promedio del período; los stocks, con el TC de cierre.",
     ]

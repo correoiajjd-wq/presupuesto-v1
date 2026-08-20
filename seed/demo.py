@@ -95,18 +95,23 @@ def build_configuration() -> Configuration:
     # Cada combinación unidad x sucursal es una operación con su centro de costo.
     operations = [
         Operation(id="OP-01", business_unit_id="BU-01", branch_id="BR-01",
-                  cost_center=CostCenter(id="CC-101", name="Repuestos Montevideo")),
+                  cost_center=CostCenter(id="CC-101", name="Repuestos Montevideo",
+                                         responsible_role=Role.UNIT_MANAGER)),
         Operation(id="OP-02", business_unit_id="BU-01", branch_id="BR-02",
-                  cost_center=CostCenter(id="CC-102", name="Repuestos Salto")),
+                  cost_center=CostCenter(id="CC-102", name="Repuestos Salto",
+                                         responsible_role=Role.UNIT_MANAGER)),
         Operation(id="OP-03", business_unit_id="BU-02", branch_id="BR-03",
-                  cost_center=CostCenter(id="CC-103", name="Servicios Centro")),
+                  cost_center=CostCenter(id="CC-103", name="Servicios Centro",
+                                         responsible_role=Role.UNIT_MANAGER)),
         # Servicios también opera dentro de la sucursal Montevideo: la misma
         # sucursal aloja dos unidades y cada una tiene su propio centro de costo.
         Operation(id="OP-04", business_unit_id="BU-02", branch_id="BR-01",
-                  cost_center=CostCenter(id="CC-104", name="Servicios Montevideo")),
+                  cost_center=CostCenter(id="CC-104", name="Servicios Montevideo",
+                                         responsible_role=Role.UNIT_MANAGER)),
     ]
     soporte = SupportUnit(id="SU-01", name="Administración central",
-                          cost_centers=[CostCenter(id="CC-01", name="Administración")])
+                          cost_centers=[CostCenter(id="CC-01", name="Administración",
+                                                   responsible_role=Role.ADMIN_AREA)])
 
     def target(kind: str, tid=None, pct=None, split=False) -> ExpenseTarget:
         return ExpenseTarget(target_type=ExpenseTargetType(kind), target_id=tid,
@@ -142,10 +147,11 @@ def build_configuration() -> Configuration:
     ]
 
     payroll = PayrollConfig(
+        currency="USD",
         areas=[
-            PayrollArea(id="AR-VEN", name="Ventas", base_salary=D(2500), currency="USD"),
-            PayrollArea(id="AR-TAL", name="Taller", base_salary=D(1800), currency="USD"),
-            PayrollArea(id="AR-ADM", name="Administración", base_salary=D(80000), currency="UYU"),
+            PayrollArea(id="AR-VEN", name="Ventas"),
+            PayrollArea(id="AR-TAL", name="Taller"),
+            PayrollArea(id="AR-ADM", name="Administración"),
         ],
         increase_rules=[
             SalaryIncreaseRule(effective_date=date(2027, 3, 1), percentage=D("0.05")),
@@ -199,7 +205,9 @@ def build_configuration() -> Configuration:
                      reviewer_role=Role.COO, approver_role=Role.CFO),
         WorkflowStep(concept="EXPENSES", loader_role=Role.ADMIN_AREA,
                      reviewer_role=Role.CFO, approver_role=Role.CFO),
-        WorkflowStep(concept="PAYROLL_HEADCOUNT", loader_role=Role.PAYROLL_AREA,
+        WorkflowStep(concept="PAYROLL_HEADCOUNT", loader_role=Role.UNIT_MANAGER,
+                     reviewer_role=Role.CFO, approver_role=Role.CFO),
+        WorkflowStep(concept="PAYROLL_SALARY", loader_role=Role.PAYROLL_AREA,
                      reviewer_role=Role.CFO, approver_role=Role.CFO),
         WorkflowStep(concept="CAPEX", loader_role=Role.ADMIN_AREA,
                      reviewer_role=Role.CFO, approver_role=Role.CFO),
@@ -326,6 +334,14 @@ def build_inputs(cfg: Configuration) -> InputSet:
                          operation_id=op_id, area_id=area_id))
     s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(3),
                      support_unit_id="SU-01", area_id="AR-ADM"))
+
+    # Nómina pone el valor: el salario nominal total de cada centro de costo.
+    nominal = {"CC-101": 20_500, "CC-102": 6_400, "CC-103": 10_000,
+               "CC-104": 5_000, "CC-01": 8_000}
+    for p in months:
+        for cc_id, monto in nominal.items():
+            s.add(InputValue(concept=Concept.NOMINAL_SALARY, period=p.code, value=D(monto),
+                             currency="USD", cost_center_id=cc_id))
     s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,
                      effective_date=date(2027, 2, 1), operation_id="OP-01", area_id="AR-VEN"))
     s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,

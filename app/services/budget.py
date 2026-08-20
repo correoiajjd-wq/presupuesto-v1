@@ -19,7 +19,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Iterable, Optional
 
-from ..domain.config import ConfigStatus, Configuration, Role
+from ..domain.config import AllocationMode, ConfigStatus, Configuration, Role
 from ..domain.engine import BudgetEngine, FY
 from ..domain.graph import DependencyGraph
 from ..domain.inputs import Concept, InputSet, InputStatus, InputValue
@@ -180,8 +180,10 @@ class AuthorizationProvider:
         },
         Role.COO: {"budget.configuration.edit", "budget.review", "budget.read"},
         Role.ADMIN_AREA: {"budget.expense.load", "budget.read"},
-        Role.PAYROLL_AREA: {"budget.payroll.load", "budget.read"},
-        Role.UNIT_MANAGER: {"budget.sales.load", "budget.read"},
+        # Doc 01 §16: las unidades informan personas, Nómina pone los valores.
+        # Son dos permisos distintos porque son dos responsabilidades distintas.
+        Role.PAYROLL_AREA: {"budget.payroll.load", "budget.headcount.load", "budget.read"},
+        Role.UNIT_MANAGER: {"budget.sales.load", "budget.headcount.load", "budget.read"},
         Role.FINANCE_AREA: {"budget.balance.load", "budget.read"},
         Role.REVIEWER: {"budget.review", "budget.read"},
         Role.APPROVER: {"budget.approve", "budget.read"},
@@ -268,6 +270,24 @@ class BudgetVersion:
         affected = self.graph.impacted_by(changed_keys)
         self._values = self.graph.evaluate(only=affected, previous=self._values)
         return self._values
+
+    def task_for(self, concept: str, scope_key: str) -> Optional[Task]:
+        """A qué tarea pertenece un input: a la más específica de su concepto.
+
+        Si hay una tarea para ese ámbito exacto, es esa; si no, la general del
+        concepto. Así un gasto imputado a un centro de costo con responsable
+        propio no queda además dentro de la tarea general de gastos.
+        """
+        exact = next((t for t in self.tasks.values()
+                      if t.concept == concept and t.scope_key == scope_key), None)
+        if exact is not None:
+            return exact
+        return next((t for t in self.tasks.values()
+                     if t.concept == concept and t.scope_key == "CO"), None)
+
+    def inputs_of(self, task: Task) -> list[InputValue]:
+        return [iv for iv in self.inputs.values
+                if self.task_for(iv.group, iv.scope_key) is task]
 
     def impact_of(self, changed_keys: Iterable[str]) -> dict:
         affected = self.graph.impacted_by(changed_keys)
@@ -394,11 +414,12 @@ class BudgetService:
         cfg = version.configuration
         wf = cfg.workflow
 
-        def add(concept: str, scope_key: str, label: str) -> None:
+        def add(concept: str, scope_key: str, label: str,
+                loader: Optional[Role] = None) -> None:
             step = wf.step(concept)
             task = Task(
                 id=_uid("TSK"), concept=concept, scope_key=scope_key, label=label,
-                loader_role=step.loader_role if step else Role.ADMIN_AREA,
+                loader_role=loader or (step.loader_role if step else Role.ADMIN_AREA),
                 reviewer_role=step.reviewer_role if step else Role.CFO,
                 approver_role=step.approver_role if step else Role.CFO,
             )
@@ -411,8 +432,25 @@ class BudgetService:
             add("PAYROLL_HEADCOUNT", f"OP:{o.id}", f"Dotación — {label}")
         for su in cfg.support_units:
             add("PAYROLL_HEADCOUNT", f"SU:{su.id}", f"Dotación — {su.name}")
+        if cfg.cost_centers():
+            # Nómina pone el valor de todos los centros de costo de una sola vez.
+            add("PAYROLL_SALARY", "CO", "Nómina — salario nominal por centro de costo")
         if cfg.expenses:
-            add("EXPENSES", "CO", "Gastos — todos los conceptos configurados")
+            # Un gasto se carga donde se imputa, y cada centro de costo tiene su
+            # responsable: el que definió el CFO al crearlo.
+            # Dónde se carga cada gasto: en modo por destino, en cada uno; en
+            # modo porcentaje, un único total a nivel empresa.
+            destinos = {t.scope_key
+                        for e in cfg.expenses if e.allocation_mode is AllocationMode.PER_TARGET
+                        for t in e.targets}
+            destinos |= {"CO" for e in cfg.expenses
+                         if e.allocation_mode is AllocationMode.PERCENTAGE}
+            for cc, _kind, label in cfg.cost_centers():
+                if f"CC:{cc.id}" in destinos:
+                    add("EXPENSES", f"CC:{cc.id}", f"Gastos — {label}",
+                        loader=cc.responsible_role)
+            for scope in sorted(d for d in destinos if not d.startswith("CC:")):
+                add("EXPENSES", scope, f"Gastos — {cfg.scope_label(scope)}")
         if cfg.capex.enabled:
             add("CAPEX", "CO", "CAPEX")
         if cfg.inventory.enabled:
@@ -451,21 +489,20 @@ class BudgetService:
     def submit_task(self, actor: str, version: BudgetVersion, task_id: str) -> Task:
         task = version.tasks[task_id]
         cap = {"SALES": "budget.sales.load", "EXPENSES": "budget.expense.load",
-               "PAYROLL_HEADCOUNT": "budget.payroll.load",
+               "PAYROLL_HEADCOUNT": "budget.headcount.load",
+               "PAYROLL_SALARY": "budget.payroll.load",
                "BALANCE": "budget.balance.load"}.get(task.concept, "budget.expense.load")
         t = self._transition(actor, version, task, TaskStatus.SUBMITTED, cap)
-        for iv in version.inputs.values:
-            if iv.group == task.concept and (iv.scope_key == task.scope_key or task.scope_key == "CO"):
-                iv.status = InputStatus.SUBMITTED
+        for iv in version.inputs_of(task):
+            iv.status = InputStatus.SUBMITTED
         self._transition(actor, version, task, TaskStatus.IN_REVIEW, cap)
         return t
 
     def approve_task(self, actor: str, version: BudgetVersion, task_id: str) -> Task:
         task = version.tasks[task_id]
         t = self._transition(actor, version, task, TaskStatus.APPROVED, "budget.approve")
-        for iv in version.inputs.values:
-            if iv.group == task.concept and (iv.scope_key == task.scope_key or task.scope_key == "CO"):
-                iv.status = InputStatus.APPROVED
+        for iv in version.inputs_of(task):
+            iv.status = InputStatus.APPROVED
         return t
 
     def reject_task(self, actor: str, version: BudgetVersion, task_id: str, comment: str) -> Task:
@@ -474,9 +511,8 @@ class BudgetService:
         task = version.tasks[task_id]
         self._transition(actor, version, task, TaskStatus.REJECTED, "budget.review", comment)
         t = self._transition(actor, version, task, TaskStatus.DRAFT, "budget.review", comment)
-        for iv in version.inputs.values:
-            if iv.group == task.concept and (iv.scope_key == task.scope_key or task.scope_key == "CO"):
-                iv.status = InputStatus.REJECTED
+        for iv in version.inputs_of(task):
+            iv.status = InputStatus.REJECTED
         return t
 
     # -- carga de inputs ---------------------------------------------------
@@ -505,12 +541,11 @@ class BudgetService:
 
     def _invalidate_dependent_approvals(self, version: BudgetVersion, iv: InputValue) -> None:
         """Doc 04 §47: aprobación parcial. Sólo vuelve a revisión lo afectado."""
+        afectada = version.task_for(iv.group, iv.scope_key)
         for t in version.tasks.values():
             if t.status is not TaskStatus.APPROVED:
                 continue
-            same_concept = t.concept == iv.group
-            same_scope = t.scope_key == iv.scope_key or t.scope_key == "CO"
-            if same_concept and same_scope:
+            if t is afectada:
                 t.status = TaskStatus.IN_REVIEW
                 t.history.append({"at": _now().isoformat(), "actor": "system",
                                   "from": "APPROVED", "to": "IN_REVIEW",

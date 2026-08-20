@@ -56,8 +56,9 @@ STEPS: list[Step] = [
          "Qué gastos existen, a qué destinos se imputan, con qué frecuencia y en qué moneda. "
          "Un mismo gasto puede ir a varias sucursales y centros de costo a la vez."),
     Step("nomina", "Nómina", Role.CFO,
-         "Áreas con su sueldo base, reglas de aumento y conceptos porcentuales. "
-         "Las unidades informan personas; Nómina pone los valores."),
+         "Las unidades informan personas; Nómina pone los valores. El costo laboral se "
+         "carga como salario nominal total de cada centro de costo de la estructura, y el "
+         "sistema le aplica los aumentos del ejercicio y los conceptos porcentuales."),
     Step("modulos", "CAPEX, Stock y Balance", Role.CFO,
          "Módulos opcionales. Lo que no se configura, no se pide."),
     Step("ratios", "Ratios y objetivos", Role.CFO,
@@ -243,6 +244,15 @@ def _cost_center_ids(cfg: Configuration) -> list[str]:
             + [c.id for u in cfg.support_units for c in u.cost_centers])
 
 
+def _cost_center(cfg: Configuration, nombre: str, donde: str, form) -> CostCenter:
+    """Un centro de costo se crea siempre igual: nombre único y responsable."""
+    return CostCenter(
+        id=_next_id(_cost_center_ids(cfg), "CC"),
+        name=_check_cost_center_name(cfg, nombre, donde),
+        responsible_role=Role(form.get("responsible_role", Role.ADMIN_AREA.value)),
+    )
+
+
 def _check_cost_center_name(cfg: Configuration, nombre: str, donde: str) -> str:
     """El nombre del centro de costo es su identificación, y es único en toda
     la empresa: no hace falta un código aparte."""
@@ -277,13 +287,12 @@ def add_operation(version, form) -> Operation:
     if cfg.operation_for(unit_id, branch_id):
         raise BudgetError("DUPLICATE_OPERATION",
                           f"{unit.name} ya opera en {branch.name}.")
-    nombre = _check_cost_center_name(cfg, form.get("cost_center_name"),
-                                     f"{unit.name} en {branch.name}")
     op = Operation(
         id=_next_id([o.id for o in cfg.operations], "OP"),
         business_unit_id=unit_id,
         branch_id=branch_id,
-        cost_center=CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), name=nombre),
+        cost_center=_cost_center(cfg, form.get("cost_center_name"),
+                                 f"{unit.name} en {branch.name}", form),
         effective_from=_opt_date(form.get("effective_from")),
         effective_to=_opt_date(form.get("effective_to")),
     )
@@ -302,11 +311,10 @@ def add_support_unit(version, form) -> SupportUnit:
     assert_open(version)
     cfg = version.configuration
     nombre_area = _name(form)
-    nombre_cc = _check_cost_center_name(cfg, form.get("cost_center_name"), nombre_area)
     su = SupportUnit(id=_next_id([u.id for u in cfg.support_units], "SU"),
                      name=nombre_area,
-                     cost_centers=[CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"),
-                                              name=nombre_cc)],
+                     cost_centers=[_cost_center(cfg, form.get("cost_center_name"),
+                                                nombre_area, form)],
                      effective_from=_opt_date(form.get("effective_from")),
                      effective_to=_opt_date(form.get("effective_to")))
     cfg.support_units.append(su)
@@ -319,8 +327,7 @@ def add_cost_center(version, form) -> CostCenter:
     assert_open(version)
     cfg = version.configuration
     su = cfg.support_unit(form["support_unit_id"])
-    nombre = _check_cost_center_name(cfg, form.get("name"), su.name)
-    cc = CostCenter(id=_next_id(_cost_center_ids(cfg), "CC"), name=nombre)
+    cc = _cost_center(cfg, form.get("name"), su.name, form)
     su.cost_centers.append(cc)
     version.invalidate()
     return cc
@@ -449,15 +456,28 @@ def add_expense(version, form) -> ExpenseDefinition:
 # 5. Nómina
 # ==========================================================================
 def add_payroll_area(version, form) -> PayrollArea:
+    """Un área de nómina sirve para que las unidades informen la dotación con
+    algún detalle. El costo no sale de acá: lo pone Nómina por centro de costo."""
     assert_open(version)
     cfg = version.configuration
     area = PayrollArea(id=_next_id([a.id for a in cfg.payroll.areas], "AR"),
-                       name=_name(form),
-                       base_salary=_dec(form["base_salary"]),
-                       currency=form["currency"].strip().upper())
+                       name=_name(form))
     cfg.payroll.areas.append(area)
     version.invalidate()
     return area
+
+
+def update_payroll(version, form) -> None:
+    """Moneda y frecuencia con las que Nómina carga el salario nominal."""
+    assert_open(version)
+    cfg = version.configuration
+    moneda = (form.get("currency") or "").strip().upper()
+    if moneda and moneda not in cfg.enabled_currencies:
+        raise BudgetError("INVALID_CURRENCY", f"{moneda} no está habilitada.")
+    if moneda:
+        cfg.payroll.currency = moneda
+    cfg.payroll.frequency = Frequency(form.get("frequency", cfg.payroll.frequency.value))
+    version.invalidate()
 
 
 def add_increase_rule(version, form) -> None:
@@ -575,7 +595,9 @@ def update_ratios(version, form) -> None:
 # 8. Workflow
 # ==========================================================================
 WORKFLOW_CONCEPTS = [
-    ("SALES", "Ventas"), ("EXPENSES", "Gastos"), ("PAYROLL_HEADCOUNT", "Nómina"),
+    ("SALES", "Ventas"), ("EXPENSES", "Gastos"),
+    ("PAYROLL_HEADCOUNT", "Dotación (personas)"),
+    ("PAYROLL_SALARY", "Nómina (salario nominal)"),
     ("CAPEX", "CAPEX"), ("OPENING_STOCK", "Stock y compras"), ("BALANCE", "Balance"),
 ]
 
@@ -601,7 +623,8 @@ def default_workflow(version) -> None:
     defaults = {
         "SALES": (Role.UNIT_MANAGER, Role.COO, Role.CFO),
         "EXPENSES": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
-        "PAYROLL_HEADCOUNT": (Role.PAYROLL_AREA, Role.CFO, Role.CFO),
+        "PAYROLL_HEADCOUNT": (Role.UNIT_MANAGER, Role.CFO, Role.CFO),
+        "PAYROLL_SALARY": (Role.PAYROLL_AREA, Role.CFO, Role.CFO),
         "CAPEX": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
         "OPENING_STOCK": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
         "BALANCE": (Role.FINANCE_AREA, Role.CFO, Role.CFO),
@@ -756,7 +779,9 @@ def step_state(version) -> dict[str, dict]:
         "gastos": {"ready": bool(cfg.expenses), "detail": f"{len(cfg.expenses)} conceptos"},
         "nomina": {"ready": bool(cfg.payroll.areas),
                    "detail": f"{len(cfg.payroll.areas)} áreas · "
-                             f"{len(cfg.payroll.increase_rules)} aumentos"},
+                             f"{len(cfg.payroll.increase_rules)} aumentos · "
+                             f"nominal en {cfg.payroll.currency} para "
+                             f"{len(cfg.cost_centers())} centros de costo"},
         "modulos": {"ready": modules_ok,
                     "detail": " · ".join(filter(None, [
                         "CAPEX" if cfg.capex.enabled else "",

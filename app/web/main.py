@@ -383,6 +383,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
             "soporte": wizard.add_support_unit, "centro": wizard.add_cost_center,
             "familia": wizard.add_family, "producto": wizard.add_product,
             "gasto": wizard.add_expense, "area": wizard.add_payroll_area,
+            "nomina": wizard.update_payroll,
             "aumento": wizard.add_increase_rule, "concepto": wizard.add_percentage_concept,
             "modulos": wizard.update_modules, "capex_categoria": wizard.add_capex_category,
             "rubro": wizard.add_balance_item, "ratios": wizard.update_ratios,

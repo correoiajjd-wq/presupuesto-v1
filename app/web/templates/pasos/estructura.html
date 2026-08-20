@@ -80,19 +80,20 @@ muchos: una unidad puede operar en varias sucursales y una sucursal alojar varia
 Unidades y sucursales son dos maneras de agrupar las mismas operaciones, por eso sus
 resultados no se suman entre sí.</p>
 <table><thead><tr><th>Unidad de negocio</th><th>Sucursal</th><th>Centro de costo</th>
-<th>Vigencia</th><th></th></tr></thead><tbody>
+<th>Responsable</th><th>Vigencia</th><th></th></tr></thead><tbody>
 {% for o in cfg.operations %}
 <tr>
   <td>{{ cfg.unit(o.business_unit_id).name }}</td>
   <td>{{ cfg.branch(o.branch_id).name }}</td>
   <td>{{ o.cost_center.name }}</td>
+  <td class="small">{{ o.cost_center.responsible_role.value }}</td>
   <td class="small">{{ o.effective_from or 'todo el ejercicio' }}{% if o.effective_to %} → {{ o.effective_to }}{% endif %}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='operation', entity_id=o.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
 </tr>
 {% else %}
-<tr><td colspan="5" class="small">Todavía no hay ninguna unidad operando en ninguna sucursal.</td></tr>
+<tr><td colspan="6" class="small">Todavía no hay ninguna unidad operando en ninguna sucursal.</td></tr>
 {% endfor %}
 </tbody></table>
 
@@ -121,6 +122,12 @@ resultados no se suman entre sí.</p>
       </select></div>
     <div style="flex:2"><label class="small">Centro de costo</label>
       <input type="text" name="cost_center_name" placeholder="Repuestos Montevideo" required></div>
+    <div style="flex:1"><label class="small">Perfil responsable</label>
+      <select name="responsible_role">
+        {% for r in roles %}
+        <option value="{{ r }}" {{ 'selected' if r == 'ADMIN_AREA' }}>{{ r }}</option>
+        {% endfor %}
+      </select></div>
   </div>
   <div class="row" style="margin-top:8px">
     <div style="flex:1"><label class="small">Inicio (opcional)</label>
@@ -131,7 +138,7 @@ resultados no se suman entre sí.</p>
   </div>
   <p class="small" style="margin-top:8px">El nombre del centro de costo tiene que ser único en
   toda la empresa: es la cuenta contra la que se registran los gastos propios de esta
-  combinación, y con eso alcanza para identificarlo.</p>
+  combinación. El perfil responsable es quien va a cargar esos gastos.</p>
 </form>
 {% else %}
 <p class="small" style="color:var(--warn)">Necesitás al menos una unidad de negocio y una
@@ -145,11 +152,13 @@ sucursal para poder crear una operación.</p>
 <p class="small">Administración, sistemas, dirección: no venden, pero gastan. Sus gastos y su
 nómina forman el pool corporativo que después se asigna a las operaciones por debajo del
 EBITDA propio. Un área se crea junto con su centro de costo, porque sin él no tiene contra
-qué imputar nada.</p>
-<table><thead><tr><th>Área de soporte</th><th>Centros de costo</th><th></th></tr></thead><tbody>
+qué imputar nada, y cada centro de costo lleva el perfil que va a cargar sus gastos.</p>
+<table><thead><tr><th>Área de soporte</th><th>Centros de costo y su responsable</th><th></th></tr></thead><tbody>
 {% for s in cfg.support_units %}
 <tr><td><b>{{ s.name }}</b> <span class="small">{{ s.id }}</span></td>
-  <td class="small">{{ s.cost_centers|map(attribute='name')|join(' · ') or '—' }}</td>
+  <td class="small">
+    {% for c in s.cost_centers %}{{ c.name }} ({{ c.responsible_role.value }}){% if not loop.last %} · {% endif %}
+    {% else %}—{% endfor %}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='estructura', kind='support_unit', entity_id=s.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
@@ -164,6 +173,12 @@ qué imputar nada.</p>
     <input type="text" name="name" placeholder="Administración central" required></div>
   <div style="flex:1"><label class="small">Su centro de costo</label>
     <input type="text" name="cost_center_name" placeholder="Administración" required></div>
+    <div style="flex:1"><label class="small">Perfil responsable</label>
+      <select name="responsible_role">
+        {% for r in roles %}
+        <option value="{{ r }}" {{ 'selected' if r == 'ADMIN_AREA' }}>{{ r }}</option>
+        {% endfor %}
+      </select></div>
   <div style="align-self:flex-end"><button class="ghost">Agregar área</button></div>
 </form>
 {% if cfg.support_units %}
@@ -175,6 +190,12 @@ qué imputar nada.</p>
     </select></div>
   <div style="flex:1"><label class="small">Centro de costo</label>
     <input type="text" name="name" placeholder="Sistemas" required></div>
+    <div style="flex:1"><label class="small">Perfil responsable</label>
+      <select name="responsible_role">
+        {% for r in roles %}
+        <option value="{{ r }}" {{ 'selected' if r == 'ADMIN_AREA' }}>{{ r }}</option>
+        {% endfor %}
+      </select></div>
   <div style="align-self:flex-end"><button class="ghost">Agregar centro</button></div>
 </form>
 {% endif %}

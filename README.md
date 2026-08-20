@@ -91,9 +91,14 @@ Las que más costó dejar bien:
 - **Vigencia parcial + frecuencia.** Una sucursal que abre en junio y un producto de carga
   trimestral: el trimestre abril-junio va **entero a junio**, no un tercio a cada mes.
   El caso obvio (repartir y después poner cero en abril y mayo) pierde dos tercios del valor.
-- **Aumentos salariales por fecha de ingreso.** Quien entra en febrero cobra el aumento de
-  marzo y el de agosto; quien entra en abril, sólo el de agosto. Se modela por cohortes de
-  ingreso, y las bajas consumen las cohortes más antiguas primero.
+- **Las unidades informan personas, Nómina pone los valores.** El costo laboral sale del
+  salario nominal total que Nómina carga contra cada centro de costo, a valores de hoy; el
+  sistema le aplica los aumentos del ejercicio y las cargas. La dotación se informa aparte,
+  por área y con fecha estimada, y **no calcula plata**: alimenta el reporte de personas y los
+  ratios por empleado. Son dos permisos distintos porque son dos responsabilidades distintas.
+- **Cada centro de costo tiene su responsable.** El perfil se elige al crear el centro, en la
+  estructura, y de ahí sale quién carga sus gastos: la tarea de ese centro de costo es suya y
+  no aparece en la tarea general de gastos.
 - **La operación es la unidad mínima.** Una unidad de negocio puede operar en varias
   sucursales y una sucursal puede alojar varias unidades: la relación es n a n. Cada
   combinación es una **operación** con su propio centro de costo, y es ahí donde se cargan
@@ -174,10 +179,11 @@ ACME Distribución S.A., ejercicio 2027, presentación USD:
 - Administración central como área de soporte con su centro de costo
 - Los cinco tipos de gasto: propio de sucursal, de unidad distribuido a sus operaciones,
   de centro de costo, distribuido 60/40 por porcentaje, y corporativo de empresa
-- Nómina con dotación inicial, altas, una baja, dos aumentos y cargas del 17%
+- Nómina con salario nominal por centro de costo, dos aumentos y cargas del 17%, más
+  dotación inicial, altas y una baja informadas por las unidades
 - Stock por familia a nivel operación, CAPEX, balance inicial y proyectado
 
-Resultado: ventas 10.915.200, EBITDA 2.757.576 (25,3%), 0 validaciones bloqueantes.
+Resultado: ventas 10.915.200, EBITDA 2.695.422 (24,7%), 0 validaciones bloqueantes.
 El reporte HTML (`reporte.html`) muestra todo eso.
 
 ---
@@ -227,7 +233,9 @@ sesiones y entre varias personas, y cada paso dice de quién es:
    Cada familia necesita su propio producto "Otros".
 4. **Gastos** — qué existe, a qué **destinos** se imputa (varios a la vez), con qué
    frecuencia y moneda.
-5. **Nómina** — áreas con su sueldo base, reglas de aumento y conceptos porcentuales.
+5. **Nómina** — moneda y frecuencia de carga, áreas de dotación, reglas de aumento y
+   conceptos porcentuales. La pantalla lista los centros de costo que salen de la estructura:
+   son los que Nómina va a tener que valorizar, y no se definen acá.
 6. **CAPEX, Stock y Balance** — módulos opcionales. Lo que no se configura, no se pide.
 7. **Ratios y objetivos** — se eligen del catálogo de 23; cada uno arrastra sus dependencias.
 8. **Workflow y responsables** — quién carga, quién revisa y quién aprueba cada concepto, y

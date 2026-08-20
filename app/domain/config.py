@@ -135,10 +135,15 @@ class CostCenter(BaseModel):
     Lo tiene cada combinación unidad x sucursal y cada área de soporte.
     El nombre es la clave: es único en toda la empresa, así que alcanza para
     identificarlo sin necesidad de un código aparte.
+
+    El perfil responsable es quien carga los valores del presupuesto de este
+    centro de costo. Se define acá y no en el workflow porque es propio de cada
+    centro: administración carga los suyos, sistemas los de sistemas.
     """
 
     id: str
     name: str
+    responsible_role: Role = Role.ADMIN_AREA
 
 
 class Operation(Effectivity):
@@ -328,19 +333,31 @@ class PayrollPercentageConcept(BaseModel):
 
 
 class PayrollArea(BaseModel):
-    """Área/sector de nómina con su salario base de referencia (lo define Nómina)."""
+    """Área/sector de nómina: ventas, taller, administración.
+
+    Sirve para que las unidades informen la dotación con algún detalle. El
+    costo laboral no sale de acá: lo carga Nómina como salario nominal total
+    de cada centro de costo.
+    """
 
     id: str
     name: str
-    base_salary: Decimal
-    currency: str
 
 
 class PayrollConfig(BaseModel):
+    """Doc 01 §16: las unidades informan personas, Nómina pone los valores.
+
+    Nómina carga el salario nominal total de cada centro de costo, a valores
+    de hoy; el sistema le aplica los aumentos proyectados y los conceptos
+    porcentuales. La dotación se informa aparte y no calcula costo: sirve para
+    el reporte de personas y para los ratios por empleado.
+    """
+
     areas: list[PayrollArea] = Field(default_factory=list)
     increase_rules: list[SalaryIncreaseRule] = Field(default_factory=list)
     percentage_concepts: list[PayrollPercentageConcept] = Field(default_factory=list)
     frequency: Frequency = Frequency.MONTHLY
+    currency: str = "USD"
 
     def area(self, area_id: str) -> PayrollArea:
         for a in self.areas:
@@ -760,9 +777,10 @@ class Configuration(BaseModel):
                     errors.append(
                         f"INVALID_EXPENSE_TARGET: el gasto {e.name} apunta a {key}, que no existe")
 
-        for a in self.payroll.areas:
-            if a.currency not in self.enabled_currencies:
-                errors.append(f"INVALID_CURRENCY: {a.currency} en área de nómina {a.name}")
+        if not self.payroll.areas:
+            errors.append("INCOMPLETE_CONFIGURATION: no hay áreas de nómina")
+        if self.payroll.currency not in self.enabled_currencies:
+            errors.append(f"INVALID_CURRENCY: {self.payroll.currency} en nómina")
         for r in self.payroll.increase_rules:
             if not (fy.start <= r.effective_date <= fy.end):
                 errors.append(
@@ -792,7 +810,7 @@ class Configuration(BaseModel):
         """Doc 02 §42: la obligatoriedad surge del modelo, no de una lista rígida."""
         from .ratios import RATIO_CATALOG
 
-        required = {"SALES", "EXPENSES", "PAYROLL_HEADCOUNT"}
+        required = {"SALES", "EXPENSES", "PAYROLL_HEADCOUNT", "PAYROLL_SALARY"}
         if self.capex.enabled:
             required.add("CAPEX")
         if self.inventory.enabled:
