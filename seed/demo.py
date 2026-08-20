@@ -22,7 +22,7 @@ from app.domain.config import (
     AllocationMode, BalanceConfig, BalanceItem, BalanceSection, Branch,
     BusinessUnit, CapexCategory, CapexConfig, Configuration, CostCenter, ExpenseDefinition,
     ExpenseTarget, ExpenseTargetType, InventoryConfig, InventoryLevel, MarginFormula, Objective,
-    ObjectiveType, PayrollArea, PayrollConfig, PayrollPercentageConcept, Product, ProductFamily,
+    ObjectiveType, PayrollConfig, PayrollPercentageConcept, Product, ProductFamily,
     Operation, RatioSelection, Role, SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowConfig,
     WorkflowStep,
 )
@@ -148,11 +148,6 @@ def build_configuration() -> Configuration:
 
     payroll = PayrollConfig(
         currency="USD",
-        areas=[
-            PayrollArea(id="AR-VEN", name="Ventas"),
-            PayrollArea(id="AR-TAL", name="Taller"),
-            PayrollArea(id="AR-ADM", name="Administración"),
-        ],
         increase_rules=[
             SalaryIncreaseRule(effective_date=date(2027, 3, 1), percentage=D("0.05")),
             SalaryIncreaseRule(effective_date=date(2027, 8, 1), percentage=D("0.04")),
@@ -206,7 +201,7 @@ def build_configuration() -> Configuration:
         WorkflowStep(concept="EXPENSES", loader_role=Role.ADMIN_AREA,
                      reviewer_role=Role.CFO, approver_role=Role.CFO),
         WorkflowStep(concept="PAYROLL_HEADCOUNT", loader_role=Role.UNIT_MANAGER,
-                     reviewer_role=Role.CFO, approver_role=Role.CFO),
+                     reviewer_role=Role.COO, approver_role=Role.CFO),
         WorkflowStep(concept="PAYROLL_SALARY", loader_role=Role.PAYROLL_AREA,
                      reviewer_role=Role.CFO, approver_role=Role.CFO),
         WorkflowStep(concept="CAPEX", loader_role=Role.ADMIN_AREA,
@@ -327,28 +322,36 @@ def build_inputs(cfg: Configuration) -> InputSet:
         s.add(_expense("BU:BU-01", "EXP-03", head.code, D(30_000), "USD"))
     s.add(_expense("CO", "EXP-04", months[0].code, D(48_000), "USD"))   # total, se reparte 60/40
 
-    # ---- Nómina ----
-    for op_id, area_id, cant in (("OP-01", "AR-VEN", 5), ("OP-01", "AR-TAL", 3),
-                                 ("OP-03", "AR-VEN", 4), ("OP-04", "AR-VEN", 2)):
-        s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(cant),
-                         operation_id=op_id, area_id=area_id))
-    s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(3),
-                     support_unit_id="SU-01", area_id="AR-ADM"))
+    # ---- Nómina: la foto inicial la pone Nómina, por centro de costo ----
+    foto = {"CC-101": (8, 20_500), "CC-102": (3, 6_400), "CC-103": (4, 10_000),
+            "CC-104": (2, 5_000), "CC-01": (3, 8_000)}
+    for cc_id, (personas, nominal) in foto.items():
+        s.add(InputValue(concept=Concept.INITIAL_HEADCOUNT, value=D(personas),
+                         cost_center_id=cc_id))
+        s.add(InputValue(concept=Concept.NOMINAL_SALARY, value=D(nominal),
+                         currency="USD", cost_center_id=cc_id))
 
-    # Nómina pone el valor: el salario nominal total de cada centro de costo.
-    nominal = {"CC-101": 20_500, "CC-102": 6_400, "CC-103": 10_000,
-               "CC-104": 5_000, "CC-01": 8_000}
-    for p in months:
-        for cc_id, monto in nominal.items():
-            s.add(InputValue(concept=Concept.NOMINAL_SALARY, period=p.code, value=D(monto),
-                             currency="USD", cost_center_id=cc_id))
-    s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,
-                     effective_date=date(2027, 2, 1), operation_id="OP-01", area_id="AR-VEN"))
-    s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(2), change_type=ChangeType.HIRED,
-                     effective_date=date(2027, 6, 1), operation_id="OP-02", area_id="AR-VEN"))
-    s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(1),
-                     change_type=ChangeType.TERMINATED, effective_date=date(2027, 9, 1),
-                     operation_id="OP-01", area_id="AR-TAL"))
+    # ---- Solicitudes de las áreas, ya valorizadas por Nómina ----
+    # El nominal que pone Nómina es el de una persona: si en la revisión se
+    # autoriza otra cantidad, el total se recalcula solo.
+    solicitudes = [
+        ("MOV-01", "CC-101", ChangeType.HIRED, date(2027, 2, 1), 2, 2_500,
+         "dos vendedores"),
+        ("MOV-02", "CC-102", ChangeType.HIRED, date(2027, 6, 1), 2, 2_100,
+         "apertura de Salto"),
+        ("MOV-03", "CC-101", ChangeType.TERMINATED, date(2027, 9, 1), 1, 2_100,
+         "baja en taller"),
+        # Un ajuste no mueve personas: sólo el valor. Sirve para un ascenso o
+        # para un cambio de jornada, y admite importe negativo.
+        ("MOV-04", "CC-01", ChangeType.ADJUSTMENT, date(2027, 7, 1), 0, 900,
+         "ascenso a jefatura"),
+    ]
+    for mov_id, cc_id, tipo, fecha, personas, unitario, motivo in solicitudes:
+        s.add(InputValue(concept=Concept.HEADCOUNT_CHANGE, value=D(personas),
+                         change_type=tipo, effective_date=fecha, cost_center_id=cc_id,
+                         comment=motivo, movement_id=mov_id))
+        s.add(InputValue(concept=Concept.NOMINAL_SALARY, value=D(unitario), currency="USD",
+                         cost_center_id=cc_id, movement_id=mov_id))
 
     # ---- CAPEX ----
     s.add(InputValue(concept=Concept.CAPEX_AMOUNT, period="2027-06", value=D(250_000),

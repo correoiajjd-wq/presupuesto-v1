@@ -109,7 +109,7 @@ class WizardCase(unittest.TestCase):
         self.assertEqual(len(v.configuration.expenses), 2)
 
         # ---- nómina
-        self.paso("nomina", "area", {"name": "Ventas"})
+        self.paso("nomina", "nomina", {"currency": "USD"})
         self.paso("nomina", "aumento", {"effective_date": "2028-04-01", "percentage": "6"})
         self.paso("nomina", "concepto", {"concept": "Cargas sociales", "percentage": "15"})
         self.assertEqual(float(v.configuration.payroll.charges_factor), 1.15)
@@ -269,7 +269,6 @@ class WizardCase(unittest.TestCase):
         self.paso("gastos", "gasto", {
             "name": "Alquiler", "target": [f"BRANCH:{central.id}", f"BRANCH:{norte.id}"],
             "currency": "USD", "frequency": "MONTHLY", "responsible_role": "ADMIN_AREA"})
-        self.paso("nomina", "area", {"name": "Ventas"})
         self.paso("nomina", "concepto", {"concept": "Cargas", "percentage": "18"})
         self.paso("ratios", "ratios", {"ratio": ["GROSS_MARGIN_PCT", "EBITDA_MARGIN_PCT"]})
         self.paso("workflow", "workflow_default", {})
@@ -292,20 +291,23 @@ class WizardCase(unittest.TestCase):
         gerente.post("/login", data={"user_id": "u.marcos"})
         gerente.post("/versiones/seleccionar", data={"version_id": v.id})
         op_central = v.configuration.branch_operations(central.id)[0]
-        propias = [t for t in v.tasks.values() if t.scope_key == f"OP:{op_central.id}"]
-        self.assertEqual(len(propias), 2)          # ventas y dotación de Central
-        # el alcance sobre la sucursal alcanza a la operación que vive ahí
-        self.assertTrue(self.service.users["u.marcos"].has_scope(
-            f"OP:{op_central.id}", v.configuration))
+        propias = [t for t in v.tasks.values()
+                   if t.scope_key in (f"OP:{op_central.id}", f"CC:{op_central.cost_center.id}")]
+        self.assertEqual(len(propias), 2)          # ventas y solicitudes de dotación
+        # el alcance sobre la sucursal alcanza a la operación y a su centro de costo
+        for ambito in (f"OP:{op_central.id}", f"CC:{op_central.cost_center.id}"):
+            self.assertTrue(self.service.users["u.marcos"].has_scope(ambito, v.configuration))
 
         t_ventas = next(t for t in propias if t.concept == "SALES")
         gerente.post(f"/tareas/{t_ventas.id}",
                      data={f"S~{unit.products[0].id}~{v.configuration.periods[0].code}": "1000",
                            f"S~{unit.products[1].id}~{v.configuration.periods[0].code}": "200"},
                      follow_redirects=True)
+        # el gerente pide gente; el importe no lo pone él
         t_dot = next(t for t in propias if t.concept == "PAYROLL_HEADCOUNT")
-        gerente.post(f"/tareas/{t_dot.id}",
-                     data={f"H~{v.configuration.payroll.areas[0].id}": "4"},
+        gerente.post(f"/tareas/{t_dot.id}/dotacion",
+                     data={"change_type": "HIRED", "quantity": "1",
+                           "effective_date": "2028-01-01", "comment": "un vendedor"},
                      follow_redirects=True)
 
         # y no puede tocar la sucursal Norte
@@ -337,21 +339,55 @@ class WizardCase(unittest.TestCase):
         t_sal = next(t for t in v.tasks.values() if t.concept == "PAYROLL_SALARY")
         centros = [cc for cc, _k, _l in v.configuration.cost_centers()]
         self.assertEqual(len(centros), 2)          # una operación por sucursal
-        nomina.post(f"/tareas/{t_sal.id}",
-                    data={f"N~{cc.id}~{p0}": "8800" if i == 0 else "0"
-                          for i, cc in enumerate(centros)},
-                    follow_redirects=True)
+        solicitud = next(iv for iv in v.inputs.values
+                         if iv.concept.value == "HEADCOUNT_CHANGE")
+        datos = {f"IH~{cc.id}": "3" if i == 0 else "0" for i, cc in enumerate(centros)}
+        datos.update({f"IN~{cc.id}": "6000" if i == 0 else "0"
+                      for i, cc in enumerate(centros)})
+        datos[f"MV~{solicitud.movement_id}"] = "2800"
+        nomina.post(f"/tareas/{t_sal.id}", data=datos, follow_redirects=True)
 
         # el motor ya calcula sobre el modelo que se armó a mano
         vals = v.calculate()
         self.assertEqual(vals[nk("SALES", "CO", p0)], D(22000))          # 1000x20 + 200x10
         self.assertEqual(vals[nk("COGS", "CO", p0)], D(16640))           # 20000x0.75 + 2000x0.82
-        self.assertEqual(vals[nk("PAYROLL", "CO", p0)], D(10384))        # 8800 x 1.18
+        self.assertEqual(vals[nk("PAYROLL", "CO", p0)], D(10384))        # (6000+2800) x 1.18
         self.assertEqual(vals[nk("EXPENSES", "CO", p0)], D(3000))
         self.assertEqual(vals[nk("EBITDA", "CO", p0)],
                          D(22000) - D(16640) - D(3000) - D(10384))
-        # y la dotación que informó el gerente sigue estando, sin calcular plata
+        # 3 de la foto inicial + 1 del alta que pidió el gerente
         self.assertEqual(vals[nk("HEADCOUNT", "CO", p0)], D(4))
+
+    def test_quien_autoriza_las_ventas_ve_la_gente_que_se_pidio(self):
+        """Doc 02 §48: el aumento de dotación se autoriza junto con los objetivos
+        de venta de esa operación, y quien revisa no tiene que ser el CFO."""
+        from app.services.budget import TaskStatus
+
+        v = self.budget.latest          # la demo, ya cerrada
+        gerente = create_web_app(self.service, self.budget.id).test_client()
+        gerente.post("/login", data={"user_id": "u.br01"})
+        t_dot = next(t for t in v.tasks.values()
+                     if t.concept == "PAYROLL_HEADCOUNT" and t.scope_key == "CC:CC-101")
+        gerente.post(f"/tareas/{t_dot.id}/dotacion",
+                     data={"change_type": "HIRED", "quantity": "10",
+                           "effective_date": "2027-07-01", "comment": "diez vendedores"},
+                     follow_redirects=True)
+
+        t_ventas = next(t for t in v.tasks.values()
+                        if t.concept == "SALES" and t.scope_key == "OP:OP-01")
+        t_ventas.status = TaskStatus.IN_REVIEW
+        coo = create_web_app(self.service, self.budget.id).test_client()
+        coo.post("/login", data={"user_id": "u.coo"})
+        html = coo.get(f"/tareas/{t_ventas.id}").data.decode()
+        self.assertIn("diez vendedores", html)
+        self.assertIn("pendiente en Nómina", html)
+        # el COO revisa: puede rechazar, no aprobar
+        self.assertIn(">Rechazar<", html)
+        self.assertNotIn(">Aprobar<", html)
+        r = coo.post(f"/tareas/{t_ventas.id}/rechazar",
+                     data={"comment": "autorizo 6, no 10"}, follow_redirects=True)
+        self.assertEqual(t_ventas.status, TaskStatus.DRAFT)
+        self.assertIn("autorizo 6", str(t_ventas.history))
 
     def test_un_gerente_no_ve_el_wizard(self):
         gerente = create_web_app(self.service, self.budget.id).test_client()
@@ -683,8 +719,7 @@ class IdempotenciaCase(unittest.TestCase):
             "productos": [(p.id, str(p.margin), str(p.commission_rate))
                           for u in cfg.business_units for p in u.products],
             "gastos": [(e.id, [t.scope_key for t in e.targets]) for e in cfg.expenses],
-            "nomina": [a.id for a in cfg.payroll.areas],
-            "nomina_carga": (cfg.payroll.currency, cfg.payroll.frequency.value),
+            "nomina": (cfg.payroll.currency, str(cfg.payroll.charges_factor)),
             "aumentos": [str(r.effective_date) for r in cfg.payroll.increase_rules],
             "ratios": [(r.ratio_code, str(r.objective.value) if r.objective else None)
                        for r in cfg.ratios],

@@ -332,38 +332,21 @@ class PayrollPercentageConcept(BaseModel):
     percentage: Decimal
 
 
-class PayrollArea(BaseModel):
-    """Área/sector de nómina: ventas, taller, administración.
-
-    Sirve para que las unidades informen la dotación con algún detalle. El
-    costo laboral no sale de acá: lo carga Nómina como salario nominal total
-    de cada centro de costo.
-    """
-
-    id: str
-    name: str
-
-
 class PayrollConfig(BaseModel):
     """Doc 01 §16: las unidades informan personas, Nómina pone los valores.
 
-    Nómina carga el salario nominal total de cada centro de costo, a valores
-    de hoy; el sistema le aplica los aumentos proyectados y los conceptos
-    porcentuales. La dotación se informa aparte y no calcula costo: sirve para
-    el reporte de personas y para los ratios por empleado.
+    Nómina carga la foto inicial de cada centro de costo —cuánta gente hay y
+    cuánto suma por mes— a valores de hoy. Después, cada solicitud de un área
+    (alta, baja o ajuste) vuelve a Nómina para que le ponga su nominal. El
+    sistema aplica los aumentos del ejercicio a cada movimiento desde su propia
+    fecha, y por eso quien entra en abril no cobra el aumento de marzo.
+
+    El nominal es mensual y se anualiza: no hay frecuencia que elegir.
     """
 
-    areas: list[PayrollArea] = Field(default_factory=list)
     increase_rules: list[SalaryIncreaseRule] = Field(default_factory=list)
     percentage_concepts: list[PayrollPercentageConcept] = Field(default_factory=list)
-    frequency: Frequency = Frequency.MONTHLY
     currency: str = "USD"
-
-    def area(self, area_id: str) -> PayrollArea:
-        for a in self.areas:
-            if a.id == area_id:
-                return a
-        raise ConfigurationError("INVALID_PAYROLL_AREA", area_id)
 
     @property
     def charges_factor(self) -> Decimal:
@@ -777,8 +760,6 @@ class Configuration(BaseModel):
                     errors.append(
                         f"INVALID_EXPENSE_TARGET: el gasto {e.name} apunta a {key}, que no existe")
 
-        if not self.payroll.areas:
-            errors.append("INCOMPLETE_CONFIGURATION: no hay áreas de nómina")
         if self.payroll.currency not in self.enabled_currencies:
             errors.append(f"INVALID_CURRENCY: {self.payroll.currency} en nómina")
         for r in self.payroll.increase_rules:

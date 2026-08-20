@@ -1,8 +1,9 @@
 <h3>1. Cómo se carga el costo laboral</h3>
 <div class="panel">
-<p class="small">Nómina carga el salario nominal total de cada centro de costo, a valores de
-hoy. El sistema le aplica los aumentos del ejercicio y los conceptos porcentuales. Las
-unidades informan la dotación aparte: personas, no plata.</p>
+<p class="small">Nómina carga la foto inicial de cada centro de costo —cuánta gente hay y
+cuánto suma por mes— a valores de hoy. Después, cada solicitud que hace un área (alta, baja o
+ajuste) vuelve a Nómina para que le ponga su nominal. El sistema aplica los aumentos a cada
+movimiento desde su propia fecha: quien entra en abril no cobra el aumento de marzo.</p>
 {% if editable %}
 <form method="post" action="{{ url_for('configurar_accion', step='nomina', action='nomina') }}"
       class="row">
@@ -11,21 +12,18 @@ unidades informan la dotación aparte: personas, no plata.</p>
       {% for c in cfg.enabled_currencies %}
       <option value="{{ c }}" {{ 'selected' if cfg.payroll.currency == c }}>{{ c }}</option>
       {% endfor %}</select></div>
-  <div style="flex:1"><label class="small">Frecuencia de carga</label>
-    <select name="frequency">
-      {% for f in ['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'] %}
-      <option value="{{ f }}" {{ 'selected' if cfg.payroll.frequency.value == f }}>{{ f|lower }}</option>
-      {% endfor %}</select></div>
+  <div style="flex:2"><p class="small" style="margin:0">El nominal es mensual y se anualiza:
+    no hay frecuencia que elegir.</p></div>
   <div style="align-self:flex-end"><button class="ghost">Guardar</button></div>
 </form>
 {% endif %}
 </div>
 
-<h3>2. Centros de costo que va a cargar Nómina</h3>
+<h3>2. Centros de costo que va a valorizar Nómina</h3>
 <div class="panel">
 <p class="small">Salen de la estructura: uno por cada combinación unidad × sucursal y los de
 cada área de soporte. No se definen acá — si falta alguno, se crea en el paso 2.</p>
-<table><thead><tr><th>Centro de costo</th><th>Ámbito</th><th>Responsable de sus gastos</th></tr></thead>
+<table><thead><tr><th>Centro de costo</th><th>Ámbito</th><th>Quién pide sus altas y bajas</th></tr></thead>
 <tbody>
 {% for cc, kind, label in cfg.cost_centers() %}
 <tr><td><b>{{ cc.name }}</b></td>
@@ -38,31 +36,7 @@ cada área de soporte. No se definen acá — si falta alguno, se crea en el pas
 </tbody></table>
 </div>
 
-<h3>3. Áreas de dotación</h3>
-<div class="panel">
-<p class="small">Sirven para que las unidades informen cuánta gente hay de cada tipo. No llevan
-sueldo: el costo sale del salario nominal del centro de costo.</p>
-<table><thead><tr><th>Área</th><th></th></tr></thead><tbody>
-{% for a in cfg.payroll.areas %}
-<tr><td>{{ a.name }} <span class="small">{{ a.id }}</span></td>
-  <td>{% if editable %}<form method="post"
-      action="{{ url_for('configurar_borrar', step='nomina', kind='payroll_area', entity_id=a.id) }}">
-      <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td></tr>
-{% else %}
-<tr><td colspan="2" class="small">Sin áreas. Sin al menos una, las unidades no tienen cómo
-  informar la dotación.</td></tr>
-{% endfor %}
-</tbody></table>
-{% if editable %}
-<form method="post" action="{{ url_for('configurar_accion', step='nomina', action='area') }}"
-      class="row" style="margin-top:12px">
-  <input type="text" name="name" placeholder="Área (Ventas, Taller...)" required style="width:220px">
-  <button class="ghost">Agregar área</button>
-</form>
-{% endif %}
-</div>
-
-<h3>4. Reglas de aumento</h3>
+<h3>3. Reglas de aumento</h3>
 <div class="panel">
 <table><thead><tr><th>Fecha</th><th>Aumento</th><th></th></tr></thead><tbody>
 {% for r in cfg.payroll.increase_rules %}
@@ -83,11 +57,12 @@ sueldo: el costo sale del salario nominal del centro de costo.</p>
   <button class="ghost">Agregar aumento</button>
 </form>
 {% endif %}
-<p class="small">El aumento rige desde su fecha y se aplica sobre el salario nominal cargado.
-Por eso Nómina carga valores de hoy: la proyección la hace el sistema, no quien carga.</p>
+<p class="small">Un aumento alcanza sólo a los movimientos anteriores a su fecha: quien entra
+en abril no cobra el de marzo, pero sí el de agosto. Por eso Nómina carga valores de hoy y la
+proyección la hace el sistema, no quien carga.</p>
 </div>
 
-<h3>5. Conceptos porcentuales sobre el sueldo</h3>
+<h3>4. Conceptos porcentuales sobre el sueldo</h3>
 <div class="panel">
 <table><thead><tr><th>Concepto</th><th>%</th><th></th></tr></thead><tbody>
 {% for c in cfg.payroll.percentage_concepts %}

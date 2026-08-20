@@ -115,6 +115,13 @@ class TaskStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+#: Qué tarea depende de cuál. Si cambia lo de arriba, lo de abajo vuelve a
+#: revisión: Nómina no puede quedar aprobada sobre una dotación que cambió.
+TASK_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "PAYROLL_HEADCOUNT": ("PAYROLL_SALARY",),
+}
+
+
 _TRANSITIONS = {
     TaskStatus.NOT_STARTED: {TaskStatus.DRAFT},
     TaskStatus.DRAFT: {TaskStatus.DRAFT, TaskStatus.SUBMITTED},
@@ -425,16 +432,17 @@ class BudgetService:
             )
             version.tasks[task.id] = task
 
-        # La carga vive en la operación: la combinación unidad x sucursal.
+        # La venta vive en la operación: la combinación unidad x sucursal.
         for o in cfg.operations:
-            label = cfg.operation_label(o.id)
-            add("SALES", f"OP:{o.id}", f"Ventas — {label}")
-            add("PAYROLL_HEADCOUNT", f"OP:{o.id}", f"Dotación — {label}")
-        for su in cfg.support_units:
-            add("PAYROLL_HEADCOUNT", f"SU:{su.id}", f"Dotación — {su.name}")
+            add("SALES", f"OP:{o.id}", f"Ventas — {cfg.operation_label(o.id)}")
+        # Las solicitudes de dotación las hace el responsable de cada centro de
+        # costo, el mismo que carga sus gastos.
+        for cc, _kind, label in cfg.cost_centers():
+            add("PAYROLL_HEADCOUNT", f"CC:{cc.id}", f"Dotación — {label}",
+                loader=cc.responsible_role)
         if cfg.cost_centers():
-            # Nómina pone el valor de todos los centros de costo de una sola vez.
-            add("PAYROLL_SALARY", "CO", "Nómina — salario nominal por centro de costo")
+            # Nómina valoriza todo de una sola vez: la foto inicial y las solicitudes.
+            add("PAYROLL_SALARY", "CO", "Nómina — foto inicial y valor de las solicitudes")
         if cfg.expenses:
             # Un gasto se carga donde se imputa, y cada centro de costo tiene su
             # responsable: el que definió el CFO al crearlo.
@@ -542,10 +550,11 @@ class BudgetService:
     def _invalidate_dependent_approvals(self, version: BudgetVersion, iv: InputValue) -> None:
         """Doc 04 §47: aprobación parcial. Sólo vuelve a revisión lo afectado."""
         afectada = version.task_for(iv.group, iv.scope_key)
+        dependientes = TASK_DEPENDENCIES.get(iv.group, ())
         for t in version.tasks.values():
             if t.status is not TaskStatus.APPROVED:
                 continue
-            if t is afectada:
+            if t is afectada or t.concept in dependientes:
                 t.status = TaskStatus.IN_REVIEW
                 t.history.append({"at": _now().isoformat(), "actor": "system",
                                   "from": "APPROVED", "to": "IN_REVIEW",

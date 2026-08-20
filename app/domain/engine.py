@@ -209,108 +209,118 @@ class BudgetEngine:
     # ------------------------------------------------------------------
     # 2. Nómina
     # ------------------------------------------------------------------
-    def _payroll_cohorts(self) -> dict[tuple[str, str], list[tuple[date, Decimal]]]:
-        """(scope_key, area_id) -> [(fecha_de_ingreso, cantidad)] antes de bajas."""
-        cohorts: dict[tuple[str, str], list[tuple[date, Decimal]]] = defaultdict(list)
-        for iv in self.inputs.of(Concept.INITIAL_HEADCOUNT):
-            cohorts[(iv.scope_key, iv.area_id)].append((self.fy.start, d(iv.value)))
-        for iv in self.inputs.of(Concept.HEADCOUNT_CHANGE):
-            if iv.change_type is ChangeType.HIRED:
-                cohorts[(iv.scope_key, iv.area_id)].append(
-                    (iv.effective_date or self.fy.start, d(iv.value))
-                )
-        for k in cohorts:
-            cohorts[k].sort(key=lambda t: t[0])
-        return cohorts
+    def _cohorts(self) -> dict[str, list[dict]]:
+        """Las cohortes de nómina de cada centro de costo.
 
-    def _terminations(self) -> dict[tuple[str, str], list[tuple[date, Decimal]]]:
-        out: dict[tuple[str, str], list[tuple[date, Decimal]]] = defaultdict(list)
+        Una cohorte es un pedazo de masa salarial con fecha propia: la foto
+        inicial y cada solicitud que las áreas informaron. La fecha importa
+        porque los aumentos del ejercicio se aplican desde ella (doc 01 §17):
+        quien entra en abril no cobra el aumento de marzo.
+
+        Una baja arrastra los aumentos que ya había recibido, porque se asume
+        que la persona estaba desde el inicio del ejercicio; si no, el descuento
+        se quedaría corto contra una masa que sí creció.
+        """
+        cfg = self.cfg
+        fy_start = self.fy.start
+        personas: dict[str, Decimal] = {}
+        for iv in self.inputs.of(Concept.INITIAL_HEADCOUNT):
+            personas[iv.cost_center_id] = personas.get(iv.cost_center_id, ZERO) + d(iv.value)
+
+        # el importe que Nómina puso: contra el centro de costo (foto inicial)
+        # o contra una solicitud concreta
+        inicial: dict[str, Decimal] = {}
+        por_solicitud: dict[str, Decimal] = {}
+        for iv in self.inputs.of(Concept.NOMINAL_SALARY):
+            monto = self._to_pres_flat(d(iv.value), iv.currency or cfg.payroll.currency)
+            if iv.movement_id:
+                por_solicitud[iv.movement_id] = por_solicitud.get(iv.movement_id, ZERO) + monto
+            elif iv.cost_center_id:
+                inicial[iv.cost_center_id] = inicial.get(iv.cost_center_id, ZERO) + monto
+
+        out: dict[str, list[dict]] = defaultdict(list)
+        conocidos = {cc.id for cc, _k, _l in cfg.cost_centers()}
+        for cc_id in sorted(conocidos):
+            out[cc_id].append({"desde": fy_start, "aplica": self.periods[0],
+                               "personas": personas.get(cc_id, ZERO),
+                               "nominal": inicial.get(cc_id, ZERO)})
+
         for iv in self.inputs.of(Concept.HEADCOUNT_CHANGE):
+            if iv.cost_center_id not in conocidos:
+                self.missing.append(
+                    f"INVALID_PAYROLL_SCOPE: solicitud de dotación en un centro de costo "
+                    f"inexistente ({iv.cost_center_id}); se ignora")
+                continue
+            fecha = iv.effective_date or fy_start
+            # Nómina valoriza una persona; el total sigue a la cantidad que
+            # haya quedado autorizada en la revisión.
+            unitario = por_solicitud.get(iv.movement_id or "", ZERO)
+            monto = unitario * (Decimal(1) if iv.change_type is ChangeType.ADJUSTMENT
+                                else d(iv.value))
             if iv.change_type is ChangeType.TERMINATED:
-                out[(iv.scope_key, iv.area_id)].append(
-                    (iv.effective_date or self.fy.start, d(iv.value))
-                )
-        for k in out:
-            out[k].sort(key=lambda t: t[0])
+                # Se paga el mes de la baja; el descuento arranca al siguiente,
+                # y arrastra los aumentos como el resto de la masa inicial.
+                out[iv.cost_center_id].append({
+                    "desde": fy_start, "aplica": self._mes_siguiente(fecha),
+                    "personas": -d(iv.value), "nominal": -monto})
+            elif iv.change_type is ChangeType.ADJUSTMENT:
+                out[iv.cost_center_id].append({
+                    "desde": fecha, "aplica": Period(fecha.year, fecha.month),
+                    "personas": ZERO, "nominal": monto})
+            else:
+                out[iv.cost_center_id].append({
+                    "desde": fecha, "aplica": Period(fecha.year, fecha.month),
+                    "personas": d(iv.value), "nominal": monto})
         return out
 
-    def _increase_factor(self, period: Period) -> Decimal:
-        """Doc 01 §17: los aumentos rigen desde su fecha.
+    def _mes_siguiente(self, fecha: date) -> Optional[Period]:
+        p = Period(fecha.year, fecha.month)
+        siguiente = [q for q in self.periods if q.first_day > p.first_day]
+        return siguiente[0] if siguiente else None
 
-        Nómina carga el salario nominal a valores de hoy; los aumentos del
-        ejercicio son un supuesto del modelo, no algo que el que carga tenga
-        que calcular a mano.
-        """
+    def _to_pres_flat(self, amount: Decimal, currency: str) -> Decimal:
+        """El nominal se convierte con el TC del primer período: es un valor de
+        hoy, no un flujo de cada mes."""
+        return self._to_pres(amount, currency, self.periods[0])
+
+    def _increase_factor(self, desde: date, period: Period) -> Decimal:
+        """Doc 01 §17: a una cohorte sólo la alcanzan los aumentos posteriores
+        a su fecha."""
         factor = Decimal(1)
         for rule in self.cfg.payroll.increase_rules:
-            if rule.effective_date <= period.last_day:
+            if desde <= rule.effective_date <= period.last_day:
                 factor *= (Decimal(1) + rule.percentage)
         return factor
 
-    def _headcount(self, scope_key: str, period: Period,
-                   cohorts: dict, terms: dict) -> Decimal:
-        """Dotación vigente: inicial + altas - bajas, hasta el fin del período.
-
-        Las bajas consumen primero las cohortes más antiguas. No calcula plata:
-        el costo laboral lo pone Nómina como salario nominal del centro de costo.
-        """
-        total = ZERO
-        for (sk, area_id), chs in cohorts.items():
-            if sk != scope_key:
-                continue
-            remaining = [[entry, q] for entry, q in chs if entry <= period.last_day]
-            for t_date, t_qty in terms.get((sk, area_id), []):
-                if t_date > period.last_day:
-                    continue
-                left = t_qty
-                for row in remaining:
-                    if left <= 0:
-                        break
-                    take = min(row[1], left)
-                    row[1] -= take
-                    left -= take
-            total += sum((q for _entry, q in remaining if q > 0), ZERO)
-        return total
-
     def _build_payroll(self) -> None:
-        """Doc 01 §16: las unidades informan personas, Nómina pone los valores.
-
-        El costo laboral de un ámbito sale del salario nominal total que Nómina
-        cargó contra su centro de costo, con los aumentos del ejercicio y los
-        conceptos porcentuales aplicados encima.
-        """
+        """Doc 01 §16: las áreas informan personas, Nómina pone los valores."""
         cfg = self.cfg
-        cohorts = self._payroll_cohorts()
-        terms = self._terminations()
+        cohortes = self._cohorts()
         charges = cfg.payroll.charges_factor
 
-        # La nómina vive en la combinación unidad x sucursal, o en un área de soporte.
-        scopes: set[str] = {scope_op(o.id) for o in cfg.operations}
-        scopes |= {scope_su(su.id) for su in cfg.support_units}
-        for (scope_key, _area) in list(cohorts.keys()) + list(terms.keys()):
-            if scope_key not in scopes:
-                self.missing.append(
-                    f"INVALID_PAYROLL_SCOPE: dotación cargada en {scope_key}, "
-                    "que no es una operación ni un área de soporte; se ignora")
-
-        # Salario nominal por centro de costo, expandido a mensual y convertido.
-        nominal: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-        for iv in self.inputs.of(Concept.NOMINAL_SALARY):
-            if not iv.cost_center_id:
-                self.missing.append(
-                    "INVALID_PAYROLL_SCOPE: salario nominal cargado sin centro de costo")
-                continue
-            lp = Period.parse(iv.period)
-            for p, v in self._expand(iv.value, lp, cfg.payroll.frequency).items():
-                nominal[iv.cost_center_id][p] += self._to_pres(
-                    v, iv.currency or cfg.payroll.currency, p)
-
-        # Qué centros de costo aportan a cada ámbito.
+        # Cada centro de costo tiene su dotación y su masa; el ámbito que lo
+        # contiene es la suma de los suyos.
         centros: dict[str, list[str]] = defaultdict(list)
         for o in cfg.operations:
             centros[scope_op(o.id)].append(o.cost_center.id)
         for su in cfg.support_units:
             centros[scope_su(su.id)] += [cc.id for cc in su.cost_centers]
+
+        for cc_id, filas in cohortes.items():
+            for p in self.periods:
+                head = ZERO
+                masa = ZERO
+                for fila in filas:
+                    aplica = fila["aplica"]
+                    if aplica is None or p.first_day < aplica.first_day:
+                        continue
+                    head += fila["personas"]
+                    masa += fila["nominal"] * self._increase_factor(fila["desde"], p)
+                self.g.constant(nk("HEADCOUNT", scope_cc(cc_id), p.code), head, kind="INPUT",
+                                formula="dotación vigente en el período")
+                self.g.constant(nk("PAYROLL_BASE", scope_cc(cc_id), p.code), masa * charges,
+                                kind="INPUT",
+                                formula="nominal de cada cohorte con sus aumentos x (1 + cargas)")
 
         # Comisiones como % de ventas (doc 01 §19). La tasa es de cada producto:
         # dentro de una misma operación, unos comisionan y otros no.
@@ -324,25 +334,17 @@ class BudgetEngine:
 
         manual_commissions: dict[str, dict[Period, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
         for iv in self.inputs.of(Concept.COMMISSION_AMOUNT):
-            lp = Period.parse(iv.period)
-            for p, v in self._expand(iv.value, lp, cfg.payroll.frequency).items():
-                manual_commissions[iv.scope_key][p] += self._to_pres(
-                    v, iv.currency or self.fx.presentation, p
-                )
+            p = Period.parse(iv.period)
+            manual_commissions[iv.scope_key][p] += self._to_pres(
+                d(iv.value), iv.currency or cfg.payroll.currency, p)
 
-        for scope_key in sorted(scopes):
+        for scope_key in sorted(set(centros)):
             for p in self.periods:
-                head = self._headcount(scope_key, p, cohorts, terms)
-                bruto = sum((nominal[cc].get(p, ZERO) for cc in centros[scope_key]), ZERO)
-                cost = bruto * self._increase_factor(p) * charges
+                for metric in ("HEADCOUNT", "PAYROLL_BASE"):
+                    keys = [nk(metric, scope_cc(cc), p.code) for cc in centros[scope_key]]
+                    self.g.calc(nk(metric, scope_key, p.code), keys, sum_of(keys),
+                                formula="suma de sus centros de costo")
 
-                self.g.constant(nk("HEADCOUNT", scope_key, p.code), head, kind="INPUT",
-                                formula="dotación vigente en el período")
-                self.g.constant(nk("PAYROLL_BASE", scope_key, p.code), cost, kind="INPUT",
-                                formula="salario nominal del centro de costo x aumentos "
-                                        "vigentes x (1 + cargas)")
-
-                # comisiones
                 comm_key = nk("COMMISSION", scope_key, p.code)
                 productos = commission_products.get(scope_key)
                 if productos:
@@ -898,6 +900,8 @@ class BudgetEngine:
         scopes += [scope_br(b.id) for b in cfg.branches]
         scopes += [scope_op(o.id) for o in cfg.operations]
         scopes += [scope_su(u.id) for u in cfg.support_units]
+        # los centros de costo también se anualizan: son el nivel donde vive la nómina
+        scopes += [scope_cc(cc.id) for cc, _k, _l in cfg.cost_centers()]
         stock_scopes: list[str] = []
         if cfg.inventory.enabled:
             for base, op_ids in self._stock_scopes():

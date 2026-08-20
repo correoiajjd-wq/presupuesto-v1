@@ -55,29 +55,63 @@
 </form>
 {% endif %}
 
+{% if task.concept == 'SALES' and spec.extra.solicitudes %}
+<h3>Gente pedida para esta operación</h3>
+<div class="panel">
+  <p class="small">Se pidió contra el centro de costo {{ spec.extra.centro }} y Nómina ya la
+    valorizó. Aprobar las ventas de esta operación es aprobar también este aumento de
+    dotación: si no corresponde, rechazá con el motivo y vuelve a quien lo pidió.</p>
+  <table>
+    <thead><tr><th>Tipo</th><th>Puesto o motivo</th><th>Personas</th><th>Desde</th>
+      <th>Nominal mensual</th></tr></thead><tbody>
+    {% for m in spec.extra.solicitudes %}
+    <tr>
+      <td>{{ {'HIRED':'Alta','TERMINATED':'Baja','ADJUSTMENT':'Ajuste'}[m.change_type.value] }}</td>
+      <td class="small">{{ m.comment or '—' }}</td>
+      <td>{{ '—' if m.change_type.value == 'ADJUSTMENT' else m.value|money }}</td>
+      <td>{{ m.effective_date }}</td>
+      <td>{% if spec.extra.valores.get(m.movement_id) is not none %}
+        {{ spec.extra.valores[m.movement_id]|money }} {{ spec.extra.currency }}
+        {% else %}<span class="tag warn">pendiente en Nómina</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody></table>
+</div>
+{% endif %}
+
 {% if task.concept == 'PAYROLL_HEADCOUNT' %}
 <h2>Altas y bajas</h2>
 <div class="panel">
-  <p class="small">Informá cantidad, área y fecha estimada. El costo lo calcula Nómina
-    aplicando los aumentos posteriores a la fecha de ingreso de cada persona.</p>
+  <p class="small">Cada solicitud le llega a Nómina para que le ponga el nominal. Un ajuste
+    (ascenso, cambio de jornada) no mueve personas: sólo el valor.</p>
   <form method="post" action="{{ url_for('dotacion', task_id=task.id) }}" class="row">
-    <select name="change_type" style="width:auto"><option value="HIRED">Alta</option>
-      <option value="TERMINATED">Baja</option></select>
-    <select name="area_id" style="width:auto">
-      {% for a in spec.extra.areas %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}
+    <select name="change_type" style="width:auto">
+      {% for k, l in spec.extra.tipos %}<option value="{{ k }}">{{ l }}</option>{% endfor %}
     </select>
-    <input type="number" name="quantity" value="1" min="1" style="width:90px">
+    <input type="number" name="quantity" value="1" min="1" style="width:80px" title="Personas">
     <input type="date" name="effective_date" style="width:auto"
            min="{{ spec.extra.fy_start }}" max="{{ spec.extra.fy_end }}"
            value="{{ spec.extra.fy_start }}">
-    <button class="ghost">Registrar</button>
+    <input type="text" name="comment" placeholder="Puesto o motivo" style="width:220px">
+    <button class="ghost">Solicitar</button>
   </form>
-  {% if spec.extra.movements %}
+  {% if spec.extra.solicitudes %}
   <table style="margin-top:14px">
-    <thead><tr><th>Tipo</th><th>Área</th><th>Cantidad</th><th>Fecha</th></tr></thead><tbody>
-    {% for m in spec.extra.movements %}
-    <tr><td>{{ 'Alta' if m.change_type.value=='HIRED' else 'Baja' }}</td>
-      <td>{{ m.area_id }}</td><td>{{ m.value|money }}</td><td>{{ m.effective_date }}</td></tr>
+    <thead><tr><th>Tipo</th><th>Puesto o motivo</th><th>Personas</th><th>Desde</th>
+      <th>Nominal</th><th></th></tr></thead><tbody>
+    {% for m in spec.extra.solicitudes %}
+    <tr>
+      <td>{{ {'HIRED':'Alta','TERMINATED':'Baja','ADJUSTMENT':'Ajuste'}[m.change_type.value] }}</td>
+      <td class="small">{{ m.comment or '—' }}</td>
+      <td>{{ '—' if m.change_type.value == 'ADJUSTMENT' else m.value|money }}</td>
+      <td>{{ m.effective_date }}</td>
+      <td>{% if spec.extra.valores.get(m.movement_id) is not none %}
+        {{ spec.extra.valores[m.movement_id]|money }} {{ spec.extra.currency }}
+        {% else %}<span class="tag warn">pendiente en Nómina</span>{% endif %}</td>
+      <td><form method="post" action="{{ url_for('borrar_dotacion', task_id=task.id,
+                                                 movement_id=m.movement_id) }}">
+        <button class="ghost" style="padding:2px 9px">borrar</button></form></td>
+    </tr>
     {% endfor %}
     </tbody></table>
   {% endif %}
@@ -118,15 +152,21 @@
 </div>
 {% endif %}
 
-{% if is_cfo and task.status.value == 'IN_REVIEW' %}
+{% set me_toca = task.reviewer_role in current_user.roles
+                 or task.approver_role in current_user.roles %}
+{% if me_toca and task.status.value == 'IN_REVIEW' %}
 <h2>Revisión</h2>
 <div class="panel row">
+  {% if 'budget.approve' in caps %}
   <form method="post" action="{{ url_for('aprobar', task_id=task.id) }}"><button>Aprobar</button></form>
+  {% endif %}
+  {% if 'budget.review' in caps %}
   <form method="post" action="{{ url_for('rechazar', task_id=task.id) }}" class="row">
     <input type="text" name="comment" placeholder="Motivo del rechazo (obligatorio)"
            style="width:340px">
     <button class="danger">Rechazar</button>
   </form>
+  {% endif %}
 </div>
 {% endif %}
 

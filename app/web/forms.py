@@ -9,7 +9,7 @@ se derivan de la configuración de la versión, igual que las planillas de carga
 masiva. Si el CFO no configuró Stock, la pantalla de Stock no existe.
 
 Los nombres de campo usan "~" como separador porque los ámbitos ya contienen
-":" (BR:BR-01).
+":" (OP:OP-01).
 """
 from __future__ import annotations
 
@@ -50,6 +50,28 @@ class FormSpec:
     extra: dict = field(default_factory=dict)
 
 
+def movement_totals(version) -> dict[str, Decimal]:
+    """El importe total de cada solicitud: nominal de una persona por cuántas
+    quedaron autorizadas."""
+    porque = {iv.movement_id: iv for iv in version.inputs.values
+              if iv.concept is Concept.HEADCOUNT_CHANGE}
+    out: dict[str, Decimal] = {}
+    for iv in version.inputs.values:
+        if iv.concept is Concept.NOMINAL_SALARY and iv.movement_id in porque:
+            out[iv.movement_id] = iv.value * movement_quantity(porque[iv.movement_id])
+    return out
+
+
+def movement_quantity(movimiento: InputValue) -> Decimal:
+    """Por cuántas personas se valoriza una solicitud.
+
+    Un ajuste no mueve gente: su importe es el total, así que cuenta como uno.
+    """
+    if movimiento.change_type is ChangeType.ADJUSTMENT:
+        return Decimal(1)
+    return Decimal(movimiento.value)
+
+
 def _index(version, concept: Concept) -> dict[str, Decimal]:
     """Los valores ya cargados, indexados por una clave estable."""
     out: dict[str, Decimal] = {}
@@ -57,7 +79,7 @@ def _index(version, concept: Concept) -> dict[str, Decimal]:
         if iv.concept is not concept:
             continue
         key = SEP.join([iv.scope_key, iv.product_id or "", iv.expense_id or "",
-                        iv.family_id or "", iv.area_id or "", iv.balance_item_id or "",
+                        iv.family_id or "", iv.balance_item_id or "",
                         iv.period or ""])
         out[key] = iv.value
     return out
@@ -109,7 +131,7 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
             if not any(cfg.is_active(op, p) and cfg.is_active(unit, p)
                        and cfg.is_active(branch, p) for p in bucket):
                 continue
-            key = SEP.join([task.scope_key, product.id, "", "", "", "", head.code])
+            key = SEP.join([task.scope_key, product.id, "", "", "", head.code])
             detail = (f"precio {product.price} {product.currency}" if unit_based
                       else f"monto en {product.currency}")
             margen = ("sin costo" if product.margin_formula.value == "NO_COST"
@@ -122,6 +144,13 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
                                label="Cantidad" if unit_based else "Monto",
                                value=_fmt(current.get(key)),
                                currency="unidades" if unit_based else product.currency)]))
+    # Doc 02 §48: quien autoriza los objetivos de venta tiene que ver, en la
+    # misma pantalla, la gente que se pidió para esa operación. Es parte de lo
+    # que está aprobando; si no la quiere, rechaza y vuelve al que la pidió.
+    solicitudes = [iv for iv in version.inputs.values
+                   if iv.concept is Concept.HEADCOUNT_CHANGE
+                   and iv.cost_center_id == op.cost_center.id]
+    solicitudes.sort(key=lambda iv: (iv.effective_date or cfg.fiscal_year_start))
     return FormSpec(
         f"Ventas — {unit.name} / {branch.name}",
         f"Se carga la operación de {unit.name} en {branch.name}; los gastos propios de esta "
@@ -129,7 +158,10 @@ def _sales_form(cfg: Configuration, version, task) -> FormSpec:
         "Cada producto se carga como lo define la configuración: por cantidad o por monto. "
         "El precio y el margen no se tocan acá; el sistema calcula ventas, costo y margen. "
         "Si un producto no se vende, cargá 0 (vacío es error).",
-        ["Producto", "Período"], rows, "budget.sales.load")
+        ["Producto", "Período"], rows, "budget.sales.load",
+        extra={"solicitudes": solicitudes, "valores": movement_totals(version),
+               "currency": cfg.payroll.currency,
+               "centro": op.cost_center.name})
 
 
 def _expenses_form(cfg: Configuration, version, task) -> FormSpec:
@@ -147,7 +179,7 @@ def _expenses_form(cfg: Configuration, version, task) -> FormSpec:
         scopes = [sc for sc in todos if sc == task.scope_key]
         for head, _ in fy.iter_buckets(ed.frequency):
             for scope in scopes:
-                key = SEP.join([scope, "", ed.id, "", "", "", head.code])
+                key = SEP.join([scope, "", ed.id, "", "", head.code])
                 destino = (cfg.scope_label(scope) if per_target
                            else "total, se reparte por porcentajes")
                 rows.append(Row(
@@ -165,56 +197,85 @@ def _expenses_form(cfg: Configuration, version, task) -> FormSpec:
 
 
 def _payroll_form(cfg: Configuration, version, task) -> FormSpec:
-    scope = task.scope_key
-    current = _index(version, Concept.INITIAL_HEADCOUNT)
-    rows: list[Row] = []
-    for area in cfg.payroll.areas:
-        key = SEP.join([scope, "", "", "", area.id, "", ""])
-        rows.append(Row(
-            label=area.name,
-            detail="personas de esta área en este ámbito",
-            fields=[Field_(name=SEP.join(["H", area.id]), label="Dotación inicial",
-                           value=_fmt(current.get(key)), currency="personas")]))
-    movements = [iv for iv in version.inputs.values
-                 if iv.concept is Concept.HEADCOUNT_CHANGE and iv.scope_key == scope]
+    """Las solicitudes de dotación de un centro de costo: altas, bajas y ajustes.
+
+    Acá no se carga plata. Cada solicitud le llega a Nómina, que le pone el
+    nominal; mientras no lo haga, la versión no se puede aprobar.
+    """
+    cc_id = task.scope_key.split(":", 1)[1]
+    solicitudes = [iv for iv in version.inputs.values
+                   if iv.concept is Concept.HEADCOUNT_CHANGE and iv.cost_center_id == cc_id]
+    valores = movement_totals(version)
+    solicitudes.sort(key=lambda iv: (iv.effective_date or cfg.fiscal_year_start))
     return FormSpec(
         task.label,
-        "Las unidades informan cantidad, área y fecha estimada. Acá no se carga plata: el "
-        "costo laboral lo pone Nómina como salario nominal de cada centro de costo. La "
-        "dotación alimenta el reporte de personas y los ratios por empleado.",
-        ["Área"], rows, "budget.headcount.load",
-        extra={"movements": movements, "areas": cfg.payroll.areas,
+        "Pedí las altas, las bajas y los ajustes de este centro de costo, con su fecha y el "
+        "puesto. El importe lo pone Nómina: cada solicitud le llega como pendiente de "
+        "valorizar, y hasta que no le ponga el número la versión no cierra. Si en la revisión "
+        "se autoriza una cantidad distinta, el importe se ajusta solo en esa proporción.",
+        [], [], "budget.headcount.load",
+        extra={"solicitudes": solicitudes, "valores": valores,
+               "tipos": [("HIRED", "Alta"), ("TERMINATED", "Baja"),
+                         ("ADJUSTMENT", "Ajuste (ascenso, cambio de jornada)")],
+               "currency": cfg.payroll.currency,
                "fy_start": cfg.fiscal_year_start, "fy_end": cfg.fiscal_year_end})
 
 
 def _salary_form(cfg: Configuration, version) -> FormSpec:
-    """Doc 01 §16: Nómina pone los valores, y los pone por centro de costo.
+    """Doc 01 §16: Nómina pone los valores.
 
-    Los centros de costo son los que se crearon en la estructura: uno por cada
-    combinación unidad x sucursal y los de cada área de soporte.
+    Dos cosas: la foto inicial de cada centro de costo —cuánta gente hay y
+    cuánto suma por mes— y el nominal de cada solicitud que pidieron las áreas.
+    Todo a valores de hoy: los aumentos del ejercicio los aplica el sistema.
     """
-    fy = cfg.fiscal_year
-    current = _index(version, Concept.NOMINAL_SALARY)
+    personas = _index(version, Concept.INITIAL_HEADCOUNT)
+    inicial = {iv.cost_center_id: iv.value for iv in version.inputs.values
+               if iv.concept is Concept.NOMINAL_SALARY and not iv.movement_id}
+    por_solicitud = {iv.movement_id: iv.value for iv in version.inputs.values
+                     if iv.concept is Concept.NOMINAL_SALARY and iv.movement_id}
+
     rows: list[Row] = []
     for cc, kind, label in cfg.cost_centers():
-        fields = []
-        for head, _ in fy.iter_buckets(cfg.payroll.frequency):
-            key = SEP.join([f"CC:{cc.id}", "", "", "", "", "", head.code])
-            fields.append(Field_(name=SEP.join(["N", cc.id, head.code]),
-                                 label=f"Nominal {head.code}",
-                                 value=_fmt(current.get(key)),
-                                 currency=cfg.payroll.currency))
-        detalle = ("operación" if kind == "OPERATION" else "área de soporte") + f" · {label}"
-        rows.append(Row(label=cc.name, detail=detalle, fields=fields))
+        key = SEP.join([f"CC:{cc.id}", "", "", "", "", ""])
+        rows.append(Row(
+            label=cc.name,
+            detail=("operación" if kind == "OPERATION" else "área de soporte") + f" · {label}",
+            fields=[
+                Field_(name=SEP.join(["IH", cc.id]), label="Personas al inicio",
+                       value=_fmt(personas.get(key)), currency="personas"),
+                Field_(name=SEP.join(["IN", cc.id]), label="Nominal mensual",
+                       value=_fmt(inicial.get(cc.id)), currency=cfg.payroll.currency),
+            ]))
+
+    etiqueta = {"HIRED": "Alta", "TERMINATED": "Baja", "ADJUSTMENT": "Ajuste"}
+    solicitudes = [iv for iv in version.inputs.values
+                   if iv.concept is Concept.HEADCOUNT_CHANGE]
+    solicitudes.sort(key=lambda iv: (iv.effective_date or cfg.fiscal_year_start))
+    for iv in solicitudes:
+        cantidad = movement_quantity(iv)
+        gente = ("" if iv.change_type is ChangeType.ADJUSTMENT
+                 else f" · {_fmt(iv.value)} personas")
+        unitario = por_solicitud.get(iv.movement_id)
+        rows.append(Row(
+            label=f"{etiqueta[iv.change_type.value]} — {iv.comment or 'sin detalle'}",
+            detail=f"{cfg.scope_label('CC:' + (iv.cost_center_id or ''))} · "
+                   f"desde {iv.effective_date}{gente}",
+            fields=[Field_(name=SEP.join(["MV", iv.movement_id or ""]),
+                           label="Nominal mensual",
+                           value="" if unitario is None else _fmt(unitario * cantidad),
+                           currency=cfg.payroll.currency)]))
+
     aumentos = " · ".join(f"{r.effective_date:%d/%m} +{r.percentage * 100:.0f}%"
                           for r in cfg.payroll.increase_rules) or "sin aumentos configurados"
     return FormSpec(
-        "Nómina — salario nominal por centro de costo",
-        f"Se carga el salario nominal total de cada centro de costo, a valores de hoy y en "
-        f"{cfg.payroll.currency}. El sistema le aplica las cargas "
+        "Nómina — foto inicial y valor de las solicitudes",
+        f"Todo en {cfg.payroll.currency} y a valores de hoy: el sistema aplica las cargas "
         f"({((cfg.payroll.charges_factor - 1) * 100):.0f}%) y los aumentos del ejercicio "
-        f"({aumentos}). Donde no hay gente, se carga 0.",
-        ["Centro de costo", "Ámbito"], rows, "budget.payroll.load")
+        f"({aumentos}) a cada movimiento desde su propia fecha. Un centro sin gente lleva 0; "
+        "vacío es un faltante. En una baja, poné lo que se deja de pagar por esa persona. "
+        "Si después se autoriza una cantidad distinta de personas, el importe se ajusta solo "
+        "en la misma proporción: no hay que volver a cargarlo.",
+        ["Centro de costo o solicitud", "Detalle"], rows, "budget.payroll.load")
 
 
 def _capex_form(cfg: Configuration, version) -> FormSpec:
@@ -246,12 +307,12 @@ def _stock_form(cfg: Configuration, version) -> FormSpec:
     rows: list[Row] = []
     for scope_key, scope_label in scopes:
         for fam in _families_for_scope(cfg, scope_key):
-            okey = SEP.join([scope_key, "", "", fam, "", "", ""])
+            okey = SEP.join([scope_key, "", "", fam, "", ""])
             fields = [Field_(name=SEP.join(["O", scope_key, fam]), label="Stock inicial",
                              value=_fmt(open_cur.get(okey)), currency=cfg.inventory.currency)]
             if cfg.inventory.purchases_enabled:
                 for head, _ in fy.iter_buckets(cfg.inventory.frequency):
-                    pkey = SEP.join([scope_key, "", "", fam, "", "", head.code])
+                    pkey = SEP.join([scope_key, "", "", fam, "", head.code])
                     fields.append(Field_(name=SEP.join(["P", scope_key, fam, head.code]),
                                          label=f"Compras {head.code}",
                                          value=_fmt(pur_cur.get(pkey)),
@@ -272,7 +333,7 @@ def _balance_form(cfg: Configuration, version) -> FormSpec:
     section_label = {"ASSET": "Activo", "LIABILITY": "Pasivo", "EQUITY": "Patrimonio"}
     rows: list[Row] = []
     for item in cfg.balance.items:
-        key = SEP.join(["CO", "", "", "", "", item.id, ""])
+        key = SEP.join(["CO", "", "", "", item.id, ""])
         detail = (f"{section_label[item.section.value]} "
                   f"{'corriente' if item.current else 'no corriente'}")
         if item.source.value == "CALCULATED":
@@ -336,15 +397,29 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
                             value=value, currency=ed.currency, expense_id=ed.id)
             _set_scope(iv, parts[2], cfg)
             pending.append(iv)
-        elif parts[0] == "N":
-            iv = InputValue(concept=Concept.NOMINAL_SALARY, value=value, period=parts[2],
+        elif parts[0] == "IH":
+            iv = InputValue(concept=Concept.INITIAL_HEADCOUNT, value=value)
+            _set_scope(iv, f"CC:{parts[1]}", cfg)
+            pending.append(iv)
+        elif parts[0] == "IN":
+            iv = InputValue(concept=Concept.NOMINAL_SALARY, value=value,
                             currency=cfg.payroll.currency)
             _set_scope(iv, f"CC:{parts[1]}", cfg)
             pending.append(iv)
-        elif parts[0] == "H":
-            iv = InputValue(concept=Concept.INITIAL_HEADCOUNT, value=value, area_id=parts[1])
-            _set_scope(iv, task.scope_key, cfg)
-            pending.append(iv)
+        elif parts[0] == "MV":
+            solicitud = next((x for x in version.inputs.values
+                              if x.concept is Concept.HEADCOUNT_CHANGE
+                              and x.movement_id == parts[1]), None)
+            if solicitud is None:
+                raise ValueError("La solicitud que se intenta valorizar ya no existe.")
+            if movement_quantity(solicitud) <= 0:
+                raise ValueError("Esa solicitud no tiene personas: corregila antes de valorizarla.")
+            # Se guarda el nominal de una persona. Así, si en la revisión se
+            # autoriza una cantidad distinta, el importe se recalcula solo.
+            pending.append(InputValue(
+                concept=Concept.NOMINAL_SALARY, value=value / movement_quantity(solicitud),
+                currency=cfg.payroll.currency, movement_id=parts[1],
+                cost_center_id=solicitud.cost_center_id))
         elif parts[0] == "O":
             iv = InputValue(concept=Concept.OPENING_STOCK, value=value,
                             currency=cfg.inventory.currency, family_id=parts[2])
@@ -385,15 +460,36 @@ def _set_scope(iv: InputValue, scope_key: str, cfg: Configuration) -> None:
 
 
 def add_headcount_change(service, actor: str, version, task, form) -> None:
+    """Una solicitud de un área. Dos solicitudes iguales el mismo día son dos
+    cosas distintas, así que cada una lleva su propio identificador: es lo que
+    ata el importe que después le pone Nómina."""
+    import uuid
     from datetime import date as _date
+
+    tipo = ChangeType(form["change_type"])
+    cantidad = Decimal(0) if tipo is ChangeType.ADJUSTMENT else Decimal(form["quantity"])
     iv = InputValue(
         concept=Concept.HEADCOUNT_CHANGE,
-        value=Decimal(form["quantity"]),
-        change_type=ChangeType(form["change_type"]),
+        value=cantidad,
+        change_type=tipo,
         effective_date=_date.fromisoformat(form["effective_date"]),
-        area_id=form["area_id"])
+        comment=(form.get("comment") or "").strip() or None,
+        movement_id=f"MOV-{uuid.uuid4().hex[:8]}")
     _set_scope(iv, task.scope_key, version.configuration)
     service.submit_input(actor, version, iv, "budget.headcount.load")
+
+
+def remove_headcount_change(service, actor: str, version, movement_id: str) -> None:
+    """Al borrar una solicitud se va también su valorización: un importe sin
+    solicitud no es de nadie."""
+    version.assert_mutable()
+    quedan = [iv for iv in version.inputs.values if iv.movement_id != movement_id]
+    if len(quedan) == len(version.inputs.values):
+        raise ValueError("Esa solicitud ya no existe.")
+    version.inputs.values = quedan
+    version.invalidate()
+    service.audit.record(actor=actor, action="MovementRemoved", entity_type="HEADCOUNT_CHANGE",
+                         entity_id=movement_id, version_id=version.id, before=movement_id)
 
 
 def add_capex(service, actor: str, version, form) -> None:

@@ -91,11 +91,24 @@ Las que más costó dejar bien:
 - **Vigencia parcial + frecuencia.** Una sucursal que abre en junio y un producto de carga
   trimestral: el trimestre abril-junio va **entero a junio**, no un tercio a cada mes.
   El caso obvio (repartir y después poner cero en abril y mayo) pierde dos tercios del valor.
-- **Las unidades informan personas, Nómina pone los valores.** El costo laboral sale del
-  salario nominal total que Nómina carga contra cada centro de costo, a valores de hoy; el
-  sistema le aplica los aumentos del ejercicio y las cargas. La dotación se informa aparte,
-  por área y con fecha estimada, y **no calcula plata**: alimenta el reporte de personas y los
-  ratios por empleado. Son dos permisos distintos porque son dos responsabilidades distintas.
+- **Las áreas piden, Nómina valoriza.** Nómina carga la foto inicial de cada centro de costo
+  —cuánta gente hay y cuánto suma por mes— y después **cada solicitud de un área (alta, baja o
+  ajuste) le llega para que le ponga su nominal**. Mientras quede una sin valorizar, la versión
+  no se aprueba; y si un área agrega o cambia una solicitud después, la tarea de Nómina vuelve
+  a revisión sola. Es la única dependencia entre tareas del sistema, y está declarada en una
+  tabla, no escondida en un `if`.
+- **La cantidad autorizada reajusta el importe sola.** Nómina valoriza una persona de la
+  solicitud, así que si en la revisión se autorizan 6 de las 10 que se pidieron, el costo se
+  recalcula con una regla de tres sin volver a pedirle nada a Nómina. Y el que autoriza los
+  objetivos de venta de una operación ve, en la misma pantalla, la gente que se pidió para
+  ella: aprobar lo uno es aprobar lo otro, y si no corresponde rechaza con el motivo y vuelve
+  al que lo pidió.
+- **Los aumentos siguen la fecha de cada movimiento.** Cada solicitud es una cohorte con fecha
+  propia, así que quien entra en junio no cobra el aumento de marzo pero sí el de agosto. El
+  alta paga desde su mes; la baja paga el mes en que ocurre, se descuenta desde el siguiente y
+  arrastra los aumentos que esa persona ya había recibido — si no, el descuento quedaría corto
+  contra una masa que sí creció. El **ajuste** cubre ascensos y cambios de jornada: mueve plata
+  sin mover personas, y admite importe negativo.
 - **Cada centro de costo tiene su responsable.** El perfil se elige al crear el centro, en la
   estructura, y de ahí sale quién carga sus gastos: la tarea de ese centro de costo es suya y
   no aparece en la tarea general de gastos.
@@ -179,11 +192,11 @@ ACME Distribución S.A., ejercicio 2027, presentación USD:
 - Administración central como área de soporte con su centro de costo
 - Los cinco tipos de gasto: propio de sucursal, de unidad distribuido a sus operaciones,
   de centro de costo, distribuido 60/40 por porcentaje, y corporativo de empresa
-- Nómina con salario nominal por centro de costo, dos aumentos y cargas del 17%, más
-  dotación inicial, altas y una baja informadas por las unidades
+- Nómina con foto inicial por centro de costo, dos aumentos y cargas del 17%, más dos altas,
+  una baja y un ascenso pedidos por las áreas y valorizados por Nómina
 - Stock por familia a nivel operación, CAPEX, balance inicial y proyectado
 
-Resultado: ventas 10.915.200, EBITDA 2.695.422 (24,7%), 0 validaciones bloqueantes.
+Resultado: ventas 10.915.200, EBITDA 2.593.059 (23,8%), 0 validaciones bloqueantes.
 El reporte HTML (`reporte.html`) muestra todo eso.
 
 ---
@@ -233,9 +246,9 @@ sesiones y entre varias personas, y cada paso dice de quién es:
    Cada familia necesita su propio producto "Otros".
 4. **Gastos** — qué existe, a qué **destinos** se imputa (varios a la vez), con qué
    frecuencia y moneda.
-5. **Nómina** — moneda y frecuencia de carga, áreas de dotación, reglas de aumento y
-   conceptos porcentuales. La pantalla lista los centros de costo que salen de la estructura:
-   son los que Nómina va a tener que valorizar, y no se definen acá.
+5. **Nómina** — moneda, reglas de aumento y conceptos porcentuales. La pantalla lista los
+   centros de costo que salen de la estructura: son los que Nómina va a tener que valorizar, y
+   no se definen acá. El nominal es mensual y se anualiza.
 6. **CAPEX, Stock y Balance** — módulos opcionales. Lo que no se configura, no se pide.
 7. **Ratios y objetivos** — se eligen del catálogo de 23; cada uno arrastra sus dependencias.
 8. **Workflow y responsables** — quién carga, quién revisa y quién aprueba cada concepto, y
@@ -279,6 +292,9 @@ en borrador redirige al wizard.
   celda vacía y subila: la rechaza entera, porque en carga masiva vacío es error.
 - Cargá un producto trimestral en un período que no sea cabecera de trimestre: `INVALID_FREQUENCY`,
   y te dice cuál es el período correcto.
+- Entrá como gerente, pedí un alta y fijate que aparece como "pendiente en Nómina" y que el
+  cierre se bloquea. Entrá como Nómina, ponele el número, y mirá cómo el costo laboral sube
+  sólo desde el mes del alta.
 - Como **CFO**, aprobá la versión en *Versiones* y después volvé a *Tareas* e intentá cargar algo.
 - En **Balance**, cambiá un rubro del activo y mirá *Alertas*: `BALANCE_NOT_BALANCED` con la
   diferencia exacta, bloqueando la aprobación.

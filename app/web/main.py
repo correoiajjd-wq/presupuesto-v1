@@ -35,7 +35,9 @@ from ..services.budget import (
 )
 from ..services.import_export import commit_import, parse_sales_import, sales_template
 from ..services.scenarios import compare, run_scenario
-from .forms import add_capex, add_headcount_change, apply_form, build_form
+from .forms import (
+    add_capex, add_headcount_change, apply_form, build_form, remove_headcount_change,
+)
 
 
 def create_web_app(service: BudgetService, budget_id: str) -> Flask:
@@ -82,6 +84,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
             "budget": budget(),
             "Role": Role,
             "is_cfo": bool(u and Role.CFO in u.roles),
+            # Quién puede qué sale de las capacidades, no de preguntar si es CFO.
+            "caps": service.auth.capabilities(u) if u else set(),
             "TaskStatus": TaskStatus,
         }
 
@@ -179,7 +183,13 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def dotacion(task_id):
         v = version()
         add_headcount_change(service, session["user_id"], v, v.tasks[task_id], request.form)
-        flash("Movimiento de dotación registrado.", "ok")
+        flash("Solicitud registrada. Nómina tiene que ponerle el valor.", "ok")
+        return redirect(url_for("carga", task_id=task_id))
+
+    @app.post("/tareas/<task_id>/dotacion/<movement_id>/borrar")
+    def borrar_dotacion(task_id, movement_id):
+        remove_headcount_change(service, session["user_id"], version(), movement_id)
+        flash("Solicitud eliminada.", "ok")
         return redirect(url_for("carga", task_id=task_id))
 
     @app.post("/tareas/<task_id>/capex")
@@ -382,8 +392,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
             "operacion": wizard.add_operation,
             "soporte": wizard.add_support_unit, "centro": wizard.add_cost_center,
             "familia": wizard.add_family, "producto": wizard.add_product,
-            "gasto": wizard.add_expense, "area": wizard.add_payroll_area,
-            "nomina": wizard.update_payroll,
+            "gasto": wizard.add_expense, "nomina": wizard.update_payroll,
             "aumento": wizard.add_increase_rule, "concepto": wizard.add_percentage_concept,
             "modulos": wizard.update_modules, "capex_categoria": wizard.add_capex_category,
             "rubro": wizard.add_balance_item, "ratios": wizard.update_ratios,

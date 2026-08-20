@@ -23,7 +23,7 @@ from ..domain.config import (
     AllocationMode, BalanceItem, BalanceSection, BalanceSource, Branch, BusinessUnit,
     CapexCategory, ConfigStatus, Configuration, CostCenter, ExpenseDefinition, ExpenseTarget,
     ExpenseTargetType, InventoryLevel, MarginFormula, Objective, ObjectiveType, Operation,
-    PayrollArea, PayrollPercentageConcept, Product, ProductFamily, RatioSelection, Role,
+    PayrollPercentageConcept, Product, ProductFamily, RatioSelection, Role,
     SalaryIncreaseRule, SalesMode, SupportUnit, WorkflowStep,
 )
 from ..domain.money import FXTable
@@ -56,9 +56,9 @@ STEPS: list[Step] = [
          "Qué gastos existen, a qué destinos se imputan, con qué frecuencia y en qué moneda. "
          "Un mismo gasto puede ir a varias sucursales y centros de costo a la vez."),
     Step("nomina", "Nómina", Role.CFO,
-         "Las unidades informan personas; Nómina pone los valores. El costo laboral se "
-         "carga como salario nominal total de cada centro de costo de la estructura, y el "
-         "sistema le aplica los aumentos del ejercicio y los conceptos porcentuales."),
+         "Las áreas piden altas, bajas y ajustes; Nómina pone los valores. Acá se define la "
+         "moneda, los aumentos previstos y las cargas: el sistema los aplica a cada "
+         "movimiento desde su propia fecha."),
     Step("modulos", "CAPEX, Stock y Balance", Role.CFO,
          "Módulos opcionales. Lo que no se configura, no se pide."),
     Step("ratios", "Ratios y objetivos", Role.CFO,
@@ -455,20 +455,8 @@ def add_expense(version, form) -> ExpenseDefinition:
 # ==========================================================================
 # 5. Nómina
 # ==========================================================================
-def add_payroll_area(version, form) -> PayrollArea:
-    """Un área de nómina sirve para que las unidades informen la dotación con
-    algún detalle. El costo no sale de acá: lo pone Nómina por centro de costo."""
-    assert_open(version)
-    cfg = version.configuration
-    area = PayrollArea(id=_next_id([a.id for a in cfg.payroll.areas], "AR"),
-                       name=_name(form))
-    cfg.payroll.areas.append(area)
-    version.invalidate()
-    return area
-
-
 def update_payroll(version, form) -> None:
-    """Moneda y frecuencia con las que Nómina carga el salario nominal."""
+    """Lo único que se elige acá es la moneda: el nominal es mensual y se anualiza."""
     assert_open(version)
     cfg = version.configuration
     moneda = (form.get("currency") or "").strip().upper()
@@ -476,7 +464,6 @@ def update_payroll(version, form) -> None:
         raise BudgetError("INVALID_CURRENCY", f"{moneda} no está habilitada.")
     if moneda:
         cfg.payroll.currency = moneda
-    cfg.payroll.frequency = Frequency(form.get("frequency", cfg.payroll.frequency.value))
     version.invalidate()
 
 
@@ -623,7 +610,7 @@ def default_workflow(version) -> None:
     defaults = {
         "SALES": (Role.UNIT_MANAGER, Role.COO, Role.CFO),
         "EXPENSES": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
-        "PAYROLL_HEADCOUNT": (Role.UNIT_MANAGER, Role.CFO, Role.CFO),
+        "PAYROLL_HEADCOUNT": (Role.UNIT_MANAGER, Role.COO, Role.CFO),
         "PAYROLL_SALARY": (Role.PAYROLL_AREA, Role.CFO, Role.CFO),
         "CAPEX": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
         "OPENING_STOCK": (Role.ADMIN_AREA, Role.CFO, Role.CFO),
@@ -728,8 +715,6 @@ def remove(version, kind: str, entity_id: str, parent_id: Optional[str] = None) 
             u.families = [f for f in u.families if f.id != entity_id]
     elif kind == "expense":
         cfg.expenses = [e for e in cfg.expenses if e.id != entity_id]
-    elif kind == "payroll_area":
-        cfg.payroll.areas = [a for a in cfg.payroll.areas if a.id != entity_id]
     elif kind == "increase_rule":
         cfg.payroll.increase_rules.pop(int(entity_id))
     elif kind == "percentage_concept":
@@ -777,11 +762,11 @@ def step_state(version) -> dict[str, dict]:
                       "detail": f"{sum(len(u.products) for u in cfg.business_units)} productos · "
                                 f"{sum(len(u.families) for u in cfg.business_units)} familias"},
         "gastos": {"ready": bool(cfg.expenses), "detail": f"{len(cfg.expenses)} conceptos"},
-        "nomina": {"ready": bool(cfg.payroll.areas),
-                   "detail": f"{len(cfg.payroll.areas)} áreas · "
+        "nomina": {"ready": bool(cfg.cost_centers()),
+                   "detail": f"nominal en {cfg.payroll.currency} para "
+                             f"{len(cfg.cost_centers())} centros de costo · "
                              f"{len(cfg.payroll.increase_rules)} aumentos · "
-                             f"nominal en {cfg.payroll.currency} para "
-                             f"{len(cfg.cost_centers())} centros de costo"},
+                             f"cargas {((cfg.payroll.charges_factor - 1) * 100):.0f}%"},
         "modulos": {"ready": modules_ok,
                     "detail": " · ".join(filter(None, [
                         "CAPEX" if cfg.capex.enabled else "",

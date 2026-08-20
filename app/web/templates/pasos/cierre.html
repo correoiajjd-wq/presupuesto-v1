@@ -44,7 +44,9 @@
   <td>{{ cfg.business_units|map(attribute='products')|map('length')|sum }} /
       {{ cfg.business_units|map(attribute='families')|map('length')|sum }}</td></tr>
 <tr><td>Gastos</td><td>{{ cfg.expenses|length }}</td></tr>
-<tr><td>Áreas de nómina</td><td>{{ cfg.payroll.areas|length }}</td></tr>
+<tr><td>Nómina</td><td>nominal en {{ cfg.payroll.currency }} para
+  {{ cfg.cost_centers()|length }} centros de costo · cargas
+  {{ ((cfg.payroll.charges_factor - 1) * 100)|round }}%</td></tr>
 <tr><td>Ratios</td><td>{{ cfg.ratios|length }}</td></tr>
 <tr><td>Conceptos que va a exigir</td><td>{{ cfg.required_concepts()|sort|join(', ')|lower }}</td></tr>
 </tbody></table></div>

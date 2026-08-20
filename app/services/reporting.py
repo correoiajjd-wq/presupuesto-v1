@@ -177,7 +177,9 @@ def configuration_checklist(cfg: Configuration) -> list[dict]:
                            f"{sum(len(u.families) for u in cfg.business_units)}")),
         ("Ventas", state(bool(cfg.business_units))),
         ("Gastos", state(bool(cfg.expenses), f"{len(cfg.expenses)}")),
-        ("Nómina", state(bool(cfg.payroll.areas), f"{len(cfg.payroll.areas)} áreas")),
+        ("Nómina", state(bool(cfg.cost_centers()),
+                         f"nominal en {cfg.payroll.currency} · "
+                         f"{len(cfg.payroll.increase_rules)} aumentos")),
         ("CAPEX", state(cfg.capex.enabled, f"{len(cfg.capex.categories)} categorías")),
         ("Stock", state(cfg.inventory.enabled, cfg.inventory.level.value if cfg.inventory.enabled else "")),
         ("Balance", state(cfg.balance.enabled, f"{len(cfg.balance.items)} rubros")),

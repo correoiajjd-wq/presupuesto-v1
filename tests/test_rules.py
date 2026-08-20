@@ -205,27 +205,72 @@ class TestPayroll(unittest.TestCase):
         self.values = self.version.calculate()
         self.cfg = self.version.configuration
 
-    def test_los_aumentos_rigen_desde_su_fecha(self):
-        """Doc 01 §17: en enero no hay aumentos; en abril rige el de marzo; en
-        diciembre, los dos. Nómina carga a valores de hoy y el sistema proyecta."""
+    def test_un_aumento_alcanza_a_quien_ya_estaba(self):
+        """Doc 01 §17: el alta de febrero cobra el aumento de marzo porque ya
+        estaba; el alta de junio no, porque entró después."""
         e = BudgetEngine(self.cfg, self.version.fx, self.version.inputs)
-        self.assertEqual(e._increase_factor(Period(2027, 1)), D(1))
-        self.assertEqual(e._increase_factor(Period(2027, 4)), D("1.05"))
-        self.assertEqual(e._increase_factor(Period(2027, 12)), D("1.05") * D("1.04"))
+        self.assertEqual(e._increase_factor(date(2027, 2, 1), Period(2027, 3)), D("1.05"))
+        self.assertEqual(e._increase_factor(date(2027, 6, 1), Period(2027, 7)), D(1))
+        self.assertEqual(e._increase_factor(date(2027, 6, 1), Period(2027, 8)), D("1.04"))
+        self.assertEqual(e._increase_factor(date(2027, 1, 1), Period(2027, 12)),
+                         D("1.05") * D("1.04"))
 
-    def test_el_costo_laboral_sigue_a_los_aumentos(self):
-        enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
-        abril = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-04")
-        self.assertEqual(abril, enero * D("1.05"))
+    def test_el_alta_arrastra_sus_propios_aumentos(self):
+        """El alta de Salto entra en junio: no cobra el aumento de marzo."""
+        cargas = D("1.17")
+        junio = val(self.values, "PAYROLL_BASE", "CC:CC-102", "2027-06")
+        self.assertEqual(junio, (D(6_400) * D("1.05") + D(4_200)) * cargas)
+        agosto = val(self.values, "PAYROLL_BASE", "CC:CC-102", "2027-08")
+        self.assertEqual(agosto,
+                         (D(6_400) * D("1.05") * D("1.04") + D(4_200) * D("1.04")) * cargas)
+
+    def test_la_baja_paga_su_mes_y_descuenta_desde_el_siguiente(self):
+        """La baja es del 1/9: septiembre se paga igual y el descuento arranca
+        en octubre, arrastrando los aumentos que esa persona ya tenía."""
+        cargas = D("1.17")
+        agosto = val(self.values, "PAYROLL_BASE", "CC:CC-101", "2027-08")
+        septiembre = val(self.values, "PAYROLL_BASE", "CC:CC-101", "2027-09")
+        octubre = val(self.values, "PAYROLL_BASE", "CC:CC-101", "2027-10")
+        self.assertEqual(septiembre, agosto)
+        self.assertEqual(octubre, septiembre - D(2_100) * D("1.05") * D("1.04") * cargas)
+        # y las personas siguen el mismo criterio que la plata
+        self.assertEqual(val(self.values, "HEADCOUNT", "CC:CC-101", "2027-09"), D(10))
+        self.assertEqual(val(self.values, "HEADCOUNT", "CC:CC-101", "2027-10"), D(9))
+
+    def test_la_cantidad_autorizada_reajusta_el_importe_sola(self):
+        """El gerente pide 2, Nómina valoriza, la revisión autoriza 1: el importe
+        se recalcula con una regla de tres, sin volver a pedirle nada a Nómina."""
+        mov = next(iv for iv in self.version.inputs.values
+                   if iv.concept is Concept.HEADCOUNT_CHANGE and iv.movement_id == "MOV-01")
+        antes = val(self.values, "PAYROLL_BASE", "CC:CC-101", "2027-02")
+        mov.value = D(1)
+        self.version.invalidate()
+        despues = self.version.calculate()
+        self.assertEqual(antes - val(despues, "PAYROLL_BASE", "CC:CC-101", "2027-02"),
+                         D(2_500) * D("1.17"))
+        self.assertEqual(val(despues, "HEADCOUNT", "CC:CC-101", "2027-02"), D(9))
+        # y no quedó nada pendiente de valorizar
+        self.assertFalse([f for f in missing_required_inputs(self.cfg, self.version.inputs)
+                          if "valorizar" in f.message])
+
+    def test_el_ajuste_mueve_plata_y_no_personas(self):
+        """Un ascenso: sube el nominal desde julio sin tocar la dotación."""
+        cargas = D("1.17")
+        junio = val(self.values, "PAYROLL_BASE", "CC:CC-01", "2027-06")
+        julio = val(self.values, "PAYROLL_BASE", "CC:CC-01", "2027-07")
+        self.assertEqual(julio - junio, D(900) * cargas)
+        personas = {val(self.values, "HEADCOUNT", "CC:CC-01", p.code)
+                    for p in self.cfg.periods}
+        self.assertEqual(personas, {D(3)})
 
     def test_dotacion_altas_y_bajas(self):
         """Doc 02 §54: dotación inicial + altas - bajas = dotación final."""
         ene = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-01")
         feb = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-02")
-        sep = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-09")
-        self.assertEqual(ene, D(8))          # 5 ventas + 3 taller
+        oct = val(self.values, "HEADCOUNT", scope_op("OP-01"), "2027-10")
+        self.assertEqual(ene, D(8))          # foto inicial que cargó Nómina
         self.assertEqual(feb, D(10))         # +2 altas
-        self.assertEqual(sep, D(9))          # -1 baja
+        self.assertEqual(oct, D(9))          # -1 baja del 1/9, efectiva en octubre
         # La sucursal Montevideo aloja además la operación de Servicios: su
         # dotación es la suma de las dos, no la de una sola.
         self.assertEqual(val(self.values, "HEADCOUNT", scope_br("BR-01"), "2027-01"),
@@ -234,28 +279,31 @@ class TestPayroll(unittest.TestCase):
     def test_costo_laboral_incluye_cargas(self):
         """Doc 01 §18: los conceptos porcentuales se aplican automáticamente.
 
-        El costo sale del salario nominal que Nómina cargó contra el centro de
-        costo de esa operación, no de la dotación.
+        El costo sale del nominal que Nómina cargó contra el centro de costo de
+        esa operación, no de la dotación.
         """
         enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
         self.assertEqual(enero, D(20_500) * D("1.17"))
 
-    def test_la_dotacion_no_calcula_plata(self):
-        """Agregar gente no mueve el costo laboral: ese número lo pone Nómina."""
-        antes = val(self.values, "PAYROLL_BASE", scope_op("OP-03"), "2027-06")
-        self.service.submit_input("u.payroll", self.version, InputValue(
+    def test_una_solicitud_sin_valorizar_bloquea(self):
+        """El área pide, Nómina valoriza. Hasta que no lo haga, no se aprueba."""
+        self.service.submit_input("u.br03", self.version, InputValue(
             concept=Concept.HEADCOUNT_CHANGE, value=D(10), change_type=ChangeType.HIRED,
-            effective_date=date(2027, 6, 1), operation_id="OP-03", area_id="AR-VEN"),
-            "budget.payroll.load")
+            effective_date=date(2027, 6, 1), cost_center_id="CC-103",
+            comment="diez vendedores", movement_id="MOV-99"),
+            "budget.headcount.load")
+        faltantes = missing_required_inputs(self.cfg, self.version.inputs)
+        self.assertTrue(any("valorizar" in f.message for f in faltantes))
+        self.assertTrue(all(f.blocking for f in faltantes))
+        # la solicitud ya mueve las personas, pero todavía no la plata
         despues = self.version.calculate(force=True)
-        self.assertEqual(val(despues, "PAYROLL_BASE", scope_op("OP-03"), "2027-06"), antes)
-        self.assertGreater(val(despues, "HEADCOUNT", scope_op("OP-03"), "2027-06"),
-                           val(self.values, "HEADCOUNT", scope_op("OP-03"), "2027-06"))
+        self.assertEqual(val(despues, "HEADCOUNT", "CC:CC-103", "2027-06"), D(14))
+        self.assertEqual(val(despues, "PAYROLL_BASE", "CC:CC-103", "2027-06"),
+                         val(self.values, "PAYROLL_BASE", "CC:CC-103", "2027-06"))
 
-    def test_el_salario_nominal_va_por_centro_de_costo(self):
-        """Cada centro de costo creado en la estructura tiene su valor de nómina."""
+    def test_la_foto_inicial_la_carga_nomina_por_centro_de_costo(self):
         cargados = {iv.cost_center_id for iv in self.version.inputs.values
-                    if iv.concept is Concept.NOMINAL_SALARY}
+                    if iv.concept is Concept.INITIAL_HEADCOUNT}
         self.assertEqual(cargados, {cc.id for cc, _k, _l in self.cfg.cost_centers()})
 
     def test_comisiones_se_calculan_desde_ventas(self):
@@ -589,8 +637,13 @@ class TestResponsables(unittest.TestCase):
         task = next(t for t in version.tasks.values() if t.concept == "PAYROLL_SALARY")
         self.assertEqual(task.loader_role, Role.PAYROLL_AREA)
         spec = build_form(version, task)
-        self.assertEqual([r.label for r in spec.rows],
+        etiquetas = [r.label for r in spec.rows]
+        # primero la foto inicial de cada centro de costo...
+        self.assertEqual(etiquetas[:len(cfg.cost_centers())],
                          [cc.name for cc, _k, _l in cfg.cost_centers()])
+        # ...y después cada solicitud que hicieron las áreas, para valorizar
+        self.assertIn("Alta — dos vendedores", etiquetas)
+        self.assertIn("Ajuste — ascenso a jefatura", etiquetas)
         self.assertEqual(len(cfg.cost_centers()), len(cfg.operations) + 1)
 
     def test_agregar_una_operacion_agrega_su_centro_a_nomina(self):
@@ -605,6 +658,9 @@ class TestResponsables(unittest.TestCase):
         service.close_configuration("u.cfo", version)
         task = next(t for t in version.tasks.values() if t.concept == "PAYROLL_SALARY")
         self.assertIn("Servicios Salto", [r.label for r in build_form(version, task).rows])
+        # y su propia tarea de solicitudes, del responsable que le pusieron
+        self.assertTrue(any(t.concept == "PAYROLL_HEADCOUNT" and t.scope_key == "CC:CC-199"
+                            for t in version.tasks.values()))
 
 
 class TestDependencyGraph(unittest.TestCase):

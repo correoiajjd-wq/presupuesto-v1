@@ -17,9 +17,9 @@ class Concept(str, Enum):
     SALES_QTY = "SALES_QTY"                  # modalidad por unidades
     SALES_AMOUNT = "SALES_AMOUNT"            # modalidad por monto
     EXPENSE_AMOUNT = "EXPENSE_AMOUNT"
-    INITIAL_HEADCOUNT = "INITIAL_HEADCOUNT"
-    HEADCOUNT_CHANGE = "HEADCOUNT_CHANGE"
-    NOMINAL_SALARY = "NOMINAL_SALARY"        # total del centro de costo, lo pone Nómina
+    INITIAL_HEADCOUNT = "INITIAL_HEADCOUNT"  # personas al inicio, por centro de costo
+    HEADCOUNT_CHANGE = "HEADCOUNT_CHANGE"    # solicitud de un área: alta, baja o ajuste
+    NOMINAL_SALARY = "NOMINAL_SALARY"        # el valor mensual, lo pone siempre Nómina
     COMMISSION_AMOUNT = "COMMISSION_AMOUNT"
     CAPEX_AMOUNT = "CAPEX_AMOUNT"
     OPENING_STOCK = "OPENING_STOCK"
@@ -33,8 +33,10 @@ CONCEPT_GROUP: dict[Concept, str] = {
     Concept.SALES_QTY: "SALES",
     Concept.SALES_AMOUNT: "SALES",
     Concept.EXPENSE_AMOUNT: "EXPENSES",
-    Concept.INITIAL_HEADCOUNT: "PAYROLL_HEADCOUNT",
+    # Las áreas piden; Nómina valoriza. Por eso la solicitud y su importe
+    # pertenecen a conceptos de carga distintos, con responsables distintos.
     Concept.HEADCOUNT_CHANGE: "PAYROLL_HEADCOUNT",
+    Concept.INITIAL_HEADCOUNT: "PAYROLL_SALARY",
     Concept.COMMISSION_AMOUNT: "PAYROLL_SALARY",
     Concept.NOMINAL_SALARY: "PAYROLL_SALARY",
     Concept.CAPEX_AMOUNT: "CAPEX",
@@ -48,8 +50,13 @@ CONCEPT_GROUP: dict[Concept, str] = {
 
 
 class ChangeType(str, Enum):
-    HIRED = "HIRED"
-    TERMINATED = "TERMINATED"
+    """Qué pide un área sobre su dotación (doc 01 §16)."""
+
+    HIRED = "HIRED"              # suma personas y nominal desde su mes
+    TERMINATED = "TERMINATED"    # resta ambos desde el mes siguiente
+    #: Ascenso, aumento individual, cambio de jornada: no mueve personas, sólo
+    #: plata, y puede ser negativo.
+    ADJUSTMENT = "ADJUSTMENT"
 
 
 class InputStatus(str, Enum):
@@ -82,12 +89,16 @@ class InputValue(BaseModel):
     product_id: Optional[str] = None
     family_id: Optional[str] = None
     expense_id: Optional[str] = None
-    area_id: Optional[str] = None
+
     capex_category_id: Optional[str] = None
     balance_item_id: Optional[str] = None
 
     change_type: Optional[ChangeType] = None
     effective_date: Optional[date] = None
+    #: Identifica la solicitud. La lleva el movimiento y también el importe que
+    #: Nómina le pone, que es lo que los ata. Dos altas iguales el mismo día son
+    #: dos solicitudes distintas, no una.
+    movement_id: Optional[str] = None
 
     status: InputStatus = InputStatus.DRAFT
     source: InputSource = InputSource.MANUAL
@@ -120,9 +131,9 @@ class InputValue(BaseModel):
             self.product_id or "",
             self.family_id or "",
             self.expense_id or "",
-            self.area_id or "",
             self.capex_category_id or "",
             self.balance_item_id or "",
+            self.movement_id or "",
             self.period or "",
             self.effective_date.isoformat() if self.effective_date else "",
             self.change_type.value if self.change_type else "",

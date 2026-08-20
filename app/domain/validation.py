@@ -18,7 +18,7 @@ from typing import Optional
 from .config import AllocationMode, Configuration, BalanceSection, BalanceSource, ExpenseTargetType
 from .engine import FY, scope_br, scope_bu, scope_co, scope_op, scope_su
 from .graph import nk
-from .inputs import Concept, InputSet
+from .inputs import ChangeType, Concept, InputSet
 from .money import FXTable
 from .periods import Period
 from .ratios import RATIO_CATALOG, format_ratio
@@ -137,25 +137,18 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
                     f"el período de carga debe ser {head.code}",
                     Severity.BLOCKING, tag))
 
-        if iv.concept is Concept.NOMINAL_SALARY:
-            if not iv.cost_center_id:
+        if iv.concept in (Concept.NOMINAL_SALARY, Concept.INITIAL_HEADCOUNT):
+            if not iv.cost_center_id and not iv.movement_id:
                 out.append(Finding("INVALID_PAYROLL_SCOPE",
-                                   f"{tag}: el salario nominal se carga contra un centro "
-                                   "de costo", Severity.BLOCKING, tag))
-            else:
+                                   f"{tag}: la nómina se carga contra un centro de costo o "
+                                   "contra una solicitud", Severity.BLOCKING, tag))
+            elif iv.cost_center_id:
                 try:
                     cfg.cost_center(iv.cost_center_id)
                 except Exception as exc:
                     out.append(Finding("INVALID_COST_CENTER", f"{tag}: {exc}",
                                        Severity.BLOCKING, tag))
-            head = fy.bucket_head(Period.parse(iv.period), cfg.payroll.frequency)
-            if Period.parse(iv.period) != head:
-                out.append(Finding(
-                    "INVALID_FREQUENCY",
-                    f"{tag}: la nómina se carga con frecuencia "
-                    f"{cfg.payroll.frequency.value}; el período de carga debe ser {head.code}",
-                    Severity.BLOCKING, tag))
-            if iv.value < 0:
+            if iv.value < 0 and not iv.movement_id:
                 out.append(Finding("INVALID_VALUE", f"{tag}: valor negativo",
                                    Severity.BLOCKING, tag))
 
@@ -170,6 +163,18 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
                     Severity.BLOCKING, tag))
 
         if iv.concept is Concept.HEADCOUNT_CHANGE:
+            if not iv.movement_id:
+                out.append(Finding("INVALID_MOVEMENT", f"{tag}: solicitud sin identificar",
+                                   Severity.BLOCKING, tag))
+            if iv.change_type is ChangeType.ADJUSTMENT and iv.value != 0:
+                out.append(Finding(
+                    "INVALID_VALUE",
+                    f"{tag}: un ajuste no mueve personas, sólo el valor de la nómina",
+                    Severity.BLOCKING, tag))
+            if iv.change_type is not ChangeType.ADJUSTMENT and iv.value <= 0:
+                out.append(Finding(
+                    "INVALID_VALUE", f"{tag}: un alta o una baja es de al menos una persona",
+                    Severity.BLOCKING, tag))
             if iv.effective_date is None:
                 out.append(Finding("MISSING_REQUIRED_INPUT", f"{tag}: falta fecha estimada",
                                    Severity.BLOCKING, tag))
@@ -235,16 +240,29 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                             Severity.BLOCKING, f"EXP:{ed.id}"))
 
     if "PAYROLL_SALARY" in required:
-        # Nómina pone el valor de cada centro de costo; donde no hay gente, 0.
+        # La foto inicial de cada centro de costo: cuánta gente hay y cuánto
+        # suma por mes. Donde no hay gente se carga 0; vacío es un faltante.
         for cc, _kind, label in cfg.cost_centers():
-            for head, _ in fy.iter_buckets(cfg.payroll.frequency):
-                if not any(iv.concept is Concept.NOMINAL_SALARY
-                           and iv.cost_center_id == cc.id and iv.period == head.code
-                           for iv in inputs.values):
-                    out.append(Finding(
-                        "MISSING_REQUIRED_INPUT",
-                        f"Nómina: falta el salario nominal de {label} para {head.code}",
-                        Severity.BLOCKING, f"CC:{cc.id}"))
+            for concepto, que in ((Concept.INITIAL_HEADCOUNT, "la dotación inicial"),
+                                  (Concept.NOMINAL_SALARY, "el salario nominal inicial")):
+                if not any(iv.concept is concepto and iv.cost_center_id == cc.id
+                           and not iv.movement_id for iv in inputs.values):
+                    out.append(Finding("MISSING_REQUIRED_INPUT",
+                                       f"Nómina: falta {que} de {label}",
+                                       Severity.BLOCKING, f"CC:{cc.id}"))
+        # Y cada solicitud de un área tiene que estar valorizada.
+        valorizadas = {iv.movement_id for iv in inputs.values
+                       if iv.concept is Concept.NOMINAL_SALARY and iv.movement_id}
+        nombre = {"HIRED": "alta", "TERMINATED": "baja", "ADJUSTMENT": "ajuste"}
+        for iv in inputs.of(Concept.HEADCOUNT_CHANGE):
+            if iv.movement_id not in valorizadas:
+                detalle = f" ({iv.comment})" if iv.comment else ""
+                out.append(Finding(
+                    "MISSING_REQUIRED_INPUT",
+                    f"Nómina: falta valorizar el {nombre[iv.change_type.value]} del "
+                    f"{iv.effective_date}{detalle} en "
+                    f"{cfg.scope_label('CC:' + (iv.cost_center_id or ''))}",
+                    Severity.BLOCKING, f"CC:{iv.cost_center_id}"))
 
     if "OPENING_STOCK" in required and cfg.inventory.enabled:
         levels = {
@@ -353,10 +371,11 @@ def collect_assumptions(cfg: Configuration) -> list[str]:
     """Doc 02 §41: los reportes deben explicitar los supuestos utilizados."""
     out = [
         "Precio y margen constantes durante el ejercicio (V1).",
-        "El costo laboral sale del salario nominal que Nómina carga por centro de costo, "
-        "a valores de hoy; los aumentos configurados se aplican sobre ese total desde su "
-        "fecha de vigencia. La dotación se informa aparte y no calcula costo: alimenta el "
-        "reporte de personas y los ratios por empleado.",
+        "Nómina carga la foto inicial de cada centro de costo y el valor de cada solicitud, "
+        "siempre a valores de hoy; el sistema aplica los aumentos del ejercicio a cada "
+        "movimiento desde su propia fecha. El alta paga desde su mes; la baja paga el mes "
+        "en que ocurre y se descuenta desde el siguiente, arrastrando los aumentos que esa "
+        "persona ya había recibido.",
         "Los valores cargados con frecuencia menor a la mensual se distribuyen en partes iguales.",
         "Los flujos se convierten con el TC promedio del período; los stocks, con el TC de cierre.",
     ]
