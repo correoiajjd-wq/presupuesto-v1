@@ -91,6 +91,10 @@ Las que más costó dejar bien:
 - **Vigencia parcial + frecuencia.** Una sucursal que abre en junio y un producto de carga
   trimestral: el trimestre abril-junio va **entero a junio**, no un tercio a cada mes.
   El caso obvio (repartir y después poner cero en abril y mayo) pierde dos tercios del valor.
+- **El permiso sale de la estructura, no de una tabla de roles.** El CFO designa un perfil
+  responsable al crear cada centro de costo, y eso habilita a ese perfil a cargar los valores
+  de ese centro —sus gastos y sus solicitudes de dotación— y sólo de ese. Designar responsables
+  no requiere tocar código.
 - **Las áreas piden, Nómina valoriza.** Nómina carga la foto inicial de cada centro de costo
   —cuánta gente hay y cuánto suma por mes— y después **cada solicitud de un área (alta, baja o
   ajuste) le llega para que le ponga su nominal**. Mientras quede una sin valorizar, la versión

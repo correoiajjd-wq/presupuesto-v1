@@ -190,12 +190,17 @@ class AuthorizationProvider:
         # Doc 01 §16: las unidades informan personas, Nómina pone los valores.
         # Son dos permisos distintos porque son dos responsabilidades distintas.
         Role.PAYROLL_AREA: {"budget.payroll.load", "budget.headcount.load", "budget.read"},
-        Role.UNIT_MANAGER: {"budget.sales.load", "budget.headcount.load", "budget.read"},
+        Role.UNIT_MANAGER: {"budget.sales.load", "budget.read"},
         Role.FINANCE_AREA: {"budget.balance.load", "budget.read"},
         Role.REVIEWER: {"budget.review", "budget.read"},
         Role.APPROVER: {"budget.approve", "budget.read"},
         Role.ADMINISTRATOR: {"budget.read"},
     }
+
+    #: Lo que habilita ser responsable de un centro de costo. El CFO designa a
+    #: esa persona al crear el centro, así que el permiso sale de la estructura
+    #: y no de agregar roles a la tabla de arriba.
+    RESPONSIBLE_CAPABILITIES = {"budget.expense.load", "budget.headcount.load"}
 
     def capabilities(self, user: User) -> set[str]:
         out: set[str] = set()
@@ -203,9 +208,22 @@ class AuthorizationProvider:
             out |= self.CAPABILITIES.get(r, set())
         return out
 
+    def responsible_for(self, user: User, capability: str, scope_key: str,
+                        cfg: Optional[Configuration]) -> bool:
+        if capability not in self.RESPONSIBLE_CAPABILITIES or cfg is None:
+            return False
+        if not scope_key.startswith("CC:"):
+            return False
+        try:
+            cc = cfg.cost_center(scope_key.split(":", 1)[1])
+        except Exception:
+            return False
+        return cc.responsible_role in user.roles
+
     def check(self, user: User, capability: str, scope_key: str = "CO",
               cfg: Optional[Configuration] = None) -> None:
-        if capability not in self.capabilities(user):
+        if (capability not in self.capabilities(user)
+                and not self.responsible_for(user, capability, scope_key, cfg)):
             raise BudgetError("UNAUTHORIZED", f"{user.name} no tiene la capacidad {capability}")
         if not user.has_scope(scope_key, cfg):
             raise BudgetError(

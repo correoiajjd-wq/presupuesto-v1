@@ -285,6 +285,21 @@ class TestPayroll(unittest.TestCase):
         enero = val(self.values, "PAYROLL_BASE", scope_op("OP-01"), "2027-01")
         self.assertEqual(enero, D(20_500) * D("1.17"))
 
+    def test_ser_responsable_de_un_centro_habilita_a_pedir_gente(self):
+        """El CFO designa al responsable al crear el centro de costo; de ahí sale
+        el permiso, sin tener que agregarle roles a la tabla de capacidades."""
+        auth = self.service.auth
+        ana = self.service.user("u.admin")          # ADMIN_AREA, responsable de CC-01
+        self.assertNotIn("budget.headcount.load", auth.capabilities(ana))
+        auth.check(ana, "budget.headcount.load", "CC:CC-01", self.cfg)
+        # pero no en un centro que no es suyo
+        with self.assertRaises(BudgetError) as ctx:
+            auth.check(ana, "budget.headcount.load", "CC:CC-101", self.cfg)
+        self.assertEqual(ctx.exception.code, "UNAUTHORIZED")
+        # y sigue sin poder valorizar: eso es de Nómina
+        with self.assertRaises(BudgetError):
+            auth.check(ana, "budget.payroll.load", "CC:CC-01", self.cfg)
+
     def test_una_solicitud_sin_valorizar_bloquea(self):
         """El área pide, Nómina valoriza. Hasta que no lo haga, no se aprueba."""
         self.service.submit_input("u.br03", self.version, InputValue(

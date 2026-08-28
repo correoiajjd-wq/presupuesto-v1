@@ -42,12 +42,13 @@ class WizardCase(unittest.TestCase):
     def unidad(self, name="Retail", **extra):
         self.paso("estructura", "unidad", {"name": name, **extra})
 
-    def sucursal(self, v, name, unit_id=None, **extra):
+    def sucursal(self, v, name, unit_id=None, responsible_role=None, **extra):
         """Alta de la sucursal y, si se indica unidad, de la operación con su CC."""
         self.paso("estructura", "sucursal", {"name": name, **extra})
         branch = next(b for b in v.configuration.branches if b.name == name)
         if unit_id:
-            self.operacion(v, unit_id, branch.id)
+            extras = {"responsible_role": responsible_role} if responsible_role else {}
+            self.operacion(v, unit_id, branch.id, **extras)
         return branch
 
     def operacion(self, v, unit_id, branch_id, expect=200, **extra):
@@ -259,8 +260,10 @@ class WizardCase(unittest.TestCase):
         v = self.crear(currencies="USD")
         self.unidad("Mayorista")
         unit = v.configuration.business_units[0]
-        central = self.sucursal(v, "Central", unit.id)
-        norte = self.sucursal(v, "Norte", unit.id)
+        # el gerente de la sucursal es el responsable del centro de costo de su
+        # operación: por eso puede pedir gente para ella
+        central = self.sucursal(v, "Central", unit.id, responsible_role="UNIT_MANAGER")
+        norte = self.sucursal(v, "Norte", unit.id, responsible_role="UNIT_MANAGER")
         self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "Alimentos"})
         fam = unit.families[0].id
         self.producto(unit.id, "A001", "Harina", fam, price="20", margin="25")
@@ -450,6 +453,33 @@ class WizardCase(unittest.TestCase):
                        "branch_id": cfg.branches[0].id, "cost_center_name": ""})
         self.assertIn(b"MISSING_COST_CENTER", r.data)
         self.assertEqual(cfg.operations, [])
+
+    def test_el_responsable_del_centro_es_quien_pide_su_gente(self):
+        """El permiso para pedir altas sale de la estructura: quien el CFO puso
+        como responsable del centro de costo, no una lista de roles."""
+        v = self.crear()
+        self.unidad("Retail")
+        unit = v.configuration.business_units[0]
+        self.sucursal(v, "Centro", unit.id, responsible_role="UNIT_MANAGER")
+        self.paso("estructura", "soporte", {"name": "Administración",
+                                            "cost_center_name": "Contabilidad",
+                                            "responsible_role": "ADMIN_AREA"})
+        cfg = v.configuration
+        operacion = cfg.operations[0].cost_center
+        soporte = cfg.support_units[0].cost_centers[0]
+        self.assertEqual(operacion.responsible_role.value, "UNIT_MANAGER")
+        self.assertEqual(soporte.responsible_role.value, "ADMIN_AREA")
+
+        # y cada tarea de dotación nace con el responsable que le corresponde
+        self.paso("productos", "familia", {"business_unit_id": unit.id, "name": "General"})
+        self.producto(unit.id, "XX", "Otros", unit.families[0].id, is_other="1")
+        self.paso("workflow", "workflow_default", {})
+        self.paso("general", "fx", {"currency": "UYU", "start_rate": "40"})
+        self.client.post("/configurar/cerrar", follow_redirects=True)
+        cargadores = {t.scope_key: t.loader_role.value for t in v.tasks.values()
+                      if t.concept == "PAYROLL_HEADCOUNT"}
+        self.assertEqual(cargadores[f"CC:{operacion.id}"], "UNIT_MANAGER")
+        self.assertEqual(cargadores[f"CC:{soporte.id}"], "ADMIN_AREA")
 
     def test_el_centro_de_costo_es_unico_en_toda_la_empresa(self):
         """El nombre es la identificación del centro de costo: no se repite ni
