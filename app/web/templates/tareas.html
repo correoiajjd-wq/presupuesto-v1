@@ -7,7 +7,9 @@ las tareas de tu rol y de las unidades sobre las que tenés alcance.</p>
 <thead><tr><th>Tarea</th><th>Ámbito</th><th>Estado</th><th></th></tr></thead><tbody>
 {% for t in tasks %}
 <tr>
-  <td><a href="{{ url_for('carga', task_id=t.id) }}">{{ t.label }}</a></td>
+  <td><a href="{{ url_for('carga', task_id=t.id) }}">{{ t.label }}
+      {% if t.status.value == 'REJECTED' and t.rejection %}
+      <div class="small" style="color:var(--neg)">Devuelta: {{ t.rejection }}</div>{% endif %}</a></td>
   <td class="small">{{ t.scope_key }}</td>
   <td>{% if t.status.value == 'APPROVED' %}<span class="tag ok">aprobada</span>
   {% elif t.status.value == 'IN_REVIEW' %}<span class="tag warn">en revisión</span>

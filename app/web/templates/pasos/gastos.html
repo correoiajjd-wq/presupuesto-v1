@@ -11,7 +11,7 @@
   </td>
   <td class="small">{{ 'un importe por destino' if e.allocation_mode.value=='PER_TARGET'
       else 'un total, repartido por %' }}</td>
-  <td class="small">{{ e.frequency.value|lower }} · {{ e.currency }} · {{ e.responsible_role.value }}</td>
+  <td class="small">{{ e.frequency.value|lower }} · {{ e.currency }}</td>
   <td>{% if editable %}<form method="post"
       action="{{ url_for('configurar_borrar', step='gastos', kind='expense', entity_id=e.id) }}">
       <button class="ghost" style="padding:2px 9px">borrar</button></form>{% endif %}</td>
@@ -34,11 +34,7 @@
         <select name="frequency"><option value="MONTHLY">Mensual</option>
           <option value="QUARTERLY">Trimestral</option><option value="SEMIANNUAL">Semestral</option>
           <option value="ANNUAL">Anual</option></select></div>
-      <div style="flex:1"><label class="small">Quién lo carga</label>
-        <select name="responsible_role">
-          <option value="ADMIN_AREA">Área administrativa</option>
-          <option value="FINANCE_AREA">Finanzas</option>
-          <option value="UNIT_MANAGER">Gerente de unidad</option></select></div>
+      <div style="flex:1"><label class="small">Quién lo carga</label></div>
     </div>
 
     <div class="row" style="margin-top:12px">

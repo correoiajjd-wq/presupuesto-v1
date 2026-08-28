@@ -580,7 +580,10 @@ class TestGovernance(unittest.TestCase):
         ventas = next(t for t in self.version.tasks.values() if t.concept == "SALES")
         ventas.status = TaskStatus.IN_REVIEW
         self.service.reject_task("u.coo", self.version, ventas.id, "faltan datos")
-        self.assertEqual(ventas.status, TaskStatus.DRAFT)
+        # queda RECHAZADA hasta que el que cargó la corrija: si volviera sola a
+        # borrador, no habría manera de saber que la devolvieron
+        self.assertEqual(ventas.status, TaskStatus.REJECTED)
+        self.assertEqual(ventas.rejection, "faltan datos")
 
     def test_borrar_pide_el_mismo_permiso_que_cargar(self):
         """Borrar es cargar al revés: Finanzas borraba dotación ajena."""

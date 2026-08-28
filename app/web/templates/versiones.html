@@ -30,12 +30,11 @@ que parte de la anterior. Nada se sobrescribe y la vigente es un puntero, no un 
   </p>
   <div class="row" style="margin-top:12px">
     {% if report.pending_tasks %}
-    <form method="post" action="{{ url_for('aprobar_todo') }}">
-      <button class="ghost">Aprobar todas las tareas (atajo de demo)</button></form>
+    
     {% endif %}
-    <form method="post" action="{{ url_for('aprobar_version') }}"><button>Aprobar versión</button></form>
-    <form method="post" action="{{ url_for('vigente') }}"><button class="ghost">Definir como vigente</button></form>
-    <form method="post" action="{{ url_for('nueva_version') }}"><button class="ghost">Crear nueva versión</button></form>
+    {% if 'budget.version.approve' in caps %}<form method="post" action="{{ url_for('aprobar_version') }}"><button>Aprobar versión</button></form>{% endif %}
+    {% if 'budget.version.set_current' in caps %}<form method="post" action="{{ url_for('vigente') }}"><button class="ghost">Definir como vigente</button></form>{% endif %}
+    {% if 'budget.version.create' in caps %}<form method="post" action="{{ url_for('nueva_version') }}"><button class="ghost">Crear nueva versión</button></form>{% endif %}
   </div>
   <p class="small" style="margin-top:12px">Probá esto: aprobá la versión y después intentá
   cargar cualquier dato o cambiar un tipo de cambio. El sistema responde VERSION_IMMUTABLE.</p>

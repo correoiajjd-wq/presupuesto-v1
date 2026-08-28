@@ -445,7 +445,6 @@ def add_expense(version, form) -> ExpenseDefinition:
         targets=targets,
         currency=form["currency"].strip().upper(),
         frequency=Frequency(form["frequency"]),
-        responsible_role=Role(form.get("responsible_role", Role.ADMIN_AREA.value)),
     )
     cfg.expenses.append(ed)
     version.invalidate()
@@ -589,14 +588,33 @@ WORKFLOW_CONCEPTS = [
 ]
 
 
+#: Qué capacidad necesita quien carga cada concepto. Elegir un rol sin esa
+#: capacidad genera una tarea que nadie puede enviar, ni siquiera el CFO.
+CAPACIDAD_DE_CARGA = {
+    "SALES": "budget.sales.load", "EXPENSES": "budget.expense.load",
+    "PAYROLL_HEADCOUNT": "budget.headcount.load", "PAYROLL_SALARY": "budget.payroll.load",
+    "CAPEX": "budget.expense.load", "OPENING_STOCK": "budget.expense.load",
+    "BALANCE": "budget.balance.load",
+}
+
+
 def update_workflow(version, form) -> None:
+    from ..services.budget import AuthorizationProvider
+
     assert_open(version)
     cfg = version.configuration
+    permisos = AuthorizationProvider.CAPABILITIES
     steps: list[WorkflowStep] = []
-    for concept, _label in WORKFLOW_CONCEPTS:
+    for concept, label in WORKFLOW_CONCEPTS:
         loader = form.get(f"loader_{concept}")
         if not loader:
             continue
+        necesaria = CAPACIDAD_DE_CARGA[concept]
+        if necesaria not in permisos.get(Role(loader), set()):
+            raise BudgetError(
+                "INVALID_WORKFLOW",
+                f"{loader} no puede cargar {label}: la tarea quedaría sin nadie que la "
+                "complete. Elegí un perfil que cargue ese concepto.")
         steps.append(WorkflowStep(
             concept=concept, loader_role=Role(loader),
             reviewer_role=Role(form.get(f"reviewer_{concept}", Role.CFO.value)),
@@ -636,7 +654,7 @@ def scope_options(cfg: Configuration) -> list[tuple[str, str]]:
     return out
 
 
-def add_user(service, version, form):
+def add_user(service, version, form, budget_id=None):
     """Doc 02 §56: cada usuario ve y carga sólo lo que tiene asignado.
 
     El alcance vacío significa transversal — es lo del CFO. Un gerente de
@@ -655,7 +673,7 @@ def add_user(service, version, form):
     while uid in service.users:
         n += 1
         uid = f"{base}{n}"
-    user = User(id=uid, name=name, roles=roles, scopes=scopes)
+    user = User(id=uid, name=name, roles=roles, scopes=scopes, budget_id=budget_id)
     service.register_user(user)
     service.audit.record(actor="cfo", action="UserRegistered", entity_type="USER",
                          entity_id=uid, version_id=version.id, after=name)
@@ -669,8 +687,35 @@ def remove_user(service, user_id: str) -> None:
 # ==========================================================================
 # Borrado
 # ==========================================================================
+#: Qué campo de un input apunta a cada tipo de entidad de la estructura.
+REFERENCIAS = {
+    "business_unit": "business_unit_id", "branch": "branch_id", "operation": "operation_id",
+    "cost_center": "cost_center_id", "product": "product_id", "family": "family_id",
+    "expense": "expense_id", "capex_category": "capex_category_id",
+    "balance_item": "balance_item_id",
+}
+
+
+def assert_sin_datos(version, kind: str, entity_id: str) -> None:
+    """Borrar algo que ya tiene datos cargados dejaba inputs apuntando al vacío
+    y la versión entera sin poder calcular, sin manera de volver atrás."""
+    campo = REFERENCIAS.get(kind)
+    if campo is None:
+        return
+    usados = [iv for iv in version.inputs.values if getattr(iv, campo, None) == entity_id]
+    if kind == "operation":
+        cc = version.configuration.operation(entity_id).cost_center.id
+        usados += [iv for iv in version.inputs.values if iv.cost_center_id == cc]
+    if usados:
+        raise BudgetError(
+            "ENTITY_IN_USE",
+            f"No se puede borrar: hay {len(usados)} datos cargados que dependen de esto. "
+            "Borrá primero esos datos, o creá una versión nueva sin ellos.")
+
+
 def remove(version, kind: str, entity_id: str, parent_id: Optional[str] = None) -> None:
     assert_open(version)
+    assert_sin_datos(version, kind, entity_id)
     cfg = version.configuration
     def _borrar_operaciones(ops: list) -> None:
         """Al irse una unidad o una sucursal se van sus operaciones, y con ellas

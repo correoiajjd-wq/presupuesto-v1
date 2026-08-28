@@ -291,7 +291,6 @@ class ExpenseDefinition(BaseModel):
     targets: list[ExpenseTarget] = Field(default_factory=list)
     currency: str
     frequency: Frequency = Frequency.MONTHLY
-    responsible_role: Role = Role.ADMIN_AREA
 
     @model_validator(mode="after")
     def _check(self) -> "ExpenseDefinition":

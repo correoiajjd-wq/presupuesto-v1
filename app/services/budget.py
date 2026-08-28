@@ -131,7 +131,7 @@ _TRANSITIONS = {
     TaskStatus.DRAFT: {TaskStatus.DRAFT, TaskStatus.SUBMITTED},
     TaskStatus.SUBMITTED: {TaskStatus.IN_REVIEW, TaskStatus.REJECTED},
     TaskStatus.IN_REVIEW: {TaskStatus.APPROVED, TaskStatus.REJECTED},
-    TaskStatus.REJECTED: {TaskStatus.DRAFT},
+    TaskStatus.REJECTED: {TaskStatus.DRAFT, TaskStatus.SUBMITTED},
     TaskStatus.APPROVED: {TaskStatus.IN_REVIEW},  # sólo si una dependencia cambia
 }
 
@@ -153,6 +153,14 @@ class Task:
     def can_transition(self, new: TaskStatus) -> bool:
         return new in _TRANSITIONS[self.status]
 
+    @property
+    def rejection(self) -> Optional[str]:
+        """El último motivo de rechazo, para mostrarlo donde se ve la tarea."""
+        for paso in reversed(self.history):
+            if paso.get("to") == TaskStatus.REJECTED.value:
+                return paso.get("comment")
+        return None
+
 
 @dataclass
 class User:
@@ -160,6 +168,10 @@ class User:
     name: str
     roles: set[Role]
     scopes: set[str] = field(default_factory=set)  # vacío = transversal (CFO)
+    #: A qué presupuesto pertenece. None = usuario de la instalación, que los
+    #: ve todos. Los que se dan de alta en el wizard quedan atados al suyo:
+    #: los ids de sucursal y centro de costo se repiten entre presupuestos.
+    budget_id: Optional[str] = None
 
     def has_scope(self, scope_key: str, cfg: Optional[Configuration] = None) -> bool:
         """Tener alcance sobre algo alcanza también a lo que ese algo contiene.
@@ -185,6 +197,10 @@ class AuthorizationProvider:
     CAPABILITIES: dict[Role, set[str]] = {
         Role.CFO: {
             "budget.configuration.edit", "budget.configuration.close", "budget.expense.load",
+            # El CFO cierra el presupuesto: tiene que poder corregir cualquier
+            # dato, incluso el que cargó otro.
+            "budget.sales.load", "budget.payroll.load", "budget.headcount.load",
+            "budget.balance.load",
             "budget.expense.review", "budget.review", "budget.approve", "budget.version.create",
             "budget.version.approve", "budget.version.set_current", "budget.fx.edit",
             "budget.scenario.run", "budget.alert.resolve", "budget.read",
@@ -541,8 +557,23 @@ class BudgetService:
                           before=before.value, after=new.value, comment=comment)
         return task
 
+    def _assert_task_is_valid(self, version: BudgetVersion, task: Task) -> None:
+        """Lo que está mal se avisa al enviar, no dos personas después.
+
+        El balance que no cerraba se guardaba, se enviaba y se aprobaba: el
+        error aparecía recién al aprobar la versión, y a otro.
+        """
+        if task.concept != "BALANCE":
+            return
+        errores = [f for tag in ("OPENING", FY)
+                   for f in validate_balance(version.configuration, version.calculate(), tag)]
+        if errores:
+            raise BudgetError("BALANCE_NOT_BALANCED", errores[0].message,
+                              {"errors": [e.message for e in errores]})
+
     def submit_task(self, actor: str, version: BudgetVersion, task_id: str) -> Task:
         task = version.tasks[task_id]
+        self._assert_task_is_valid(version, task)
         cap = {"SALES": "budget.sales.load", "EXPENSES": "budget.expense.load",
                "PAYROLL_HEADCOUNT": "budget.headcount.load",
                "PAYROLL_SALARY": "budget.payroll.load",
@@ -565,9 +596,10 @@ class BudgetService:
         if not comment:
             raise BudgetError("MISSING_COMMENT", "El rechazo requiere un motivo (doc 02 §48).")
         task = version.tasks[task_id]
-        self._transition(actor, version, task, TaskStatus.REJECTED, "budget.review", comment,
-                         role_attr="reviewer_role")
-        t = self._transition(actor, version, task, TaskStatus.DRAFT, "budget.review", comment,
+        # La tarea queda RECHAZADA, no vuelve sola a borrador: si no, el que
+        # cargó la ve igual que cualquier otra y no se entera de que le
+        # devolvieron el trabajo. Vuelve a borrador cuando la corrige.
+        t = self._transition(actor, version, task, TaskStatus.REJECTED, "budget.review", comment,
                              role_attr="reviewer_role")
         for iv in version.inputs_of(task):
             iv.status = InputStatus.REJECTED
@@ -608,24 +640,27 @@ class BudgetService:
         NOT_STARTED y no había forma de aprobar la versión.
         """
         task = version.task_for(iv.group, iv.scope_key)
-        if task is None or task.status is not TaskStatus.NOT_STARTED:
+        if task is None or task.status not in (TaskStatus.NOT_STARTED, TaskStatus.REJECTED):
             return
+        antes = task.status
         task.status = TaskStatus.DRAFT
         task.history.append({"at": _now().isoformat(), "actor": actor,
-                             "from": TaskStatus.NOT_STARTED.value, "to": TaskStatus.DRAFT.value,
-                             "comment": "se cargó el primer dato"})
+                             "from": antes.value, "to": TaskStatus.DRAFT.value,
+                             "comment": "se cargó un dato"})
         self.audit.record(actor=actor, action="TaskStarted", entity_type="TASK",
                           entity_id=task.id, version_id=version.id,
-                          before=TaskStatus.NOT_STARTED.value, after=TaskStatus.DRAFT.value)
+                          before=antes.value, after=TaskStatus.DRAFT.value)
 
     def remove_inputs(self, actor: str, version: BudgetVersion, movement_id: str,
-                      capability: str = "budget.headcount.load") -> int:
+                      capability: str = "budget.headcount.load", scope_key: str = "") -> int:
         """Borrar es cargar al revés: pide el mismo permiso y tiene las mismas
         consecuencias sobre lo que ya estaba aprobado."""
         version.assert_mutable()
         afectados = [iv for iv in version.inputs.values if iv.movement_id == movement_id]
         if not afectados:
             raise BudgetError("NOT_FOUND", "Esa solicitud ya no existe.")
+        if scope_key and any(iv.scope_key != scope_key for iv in afectados):
+            raise BudgetError("NOT_FOUND", "Esa solicitud no es de esta tarea.")
         user = self.user(actor)
         for iv in afectados:
             self.auth.check(user, capability, iv.scope_key, version.configuration)

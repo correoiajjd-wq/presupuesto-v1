@@ -369,6 +369,20 @@ def _dec(raw: str) -> Optional[Decimal]:
         raise ValueError(f"'{raw}' no es un número")
 
 
+#: Qué permiso pide cada dato. Antes se usaba el de la tarea abierta, así que
+#: quien tenía una tarea propia podía escribir cualquier otro concepto.
+CAPABILITY_FOR = {
+    "SALES": "budget.sales.load",
+    "EXPENSES": "budget.expense.load",
+    "PAYROLL_HEADCOUNT": "budget.headcount.load",
+    "PAYROLL_SALARY": "budget.payroll.load",
+    "CAPEX": "budget.expense.load",
+    "OPENING_STOCK": "budget.expense.load",
+    "PURCHASES": "budget.expense.load",
+    "BALANCE": "budget.balance.load",
+}
+
+
 def apply_form(service, actor: str, version, task, formdata) -> int:
     """Convierte el formulario en inputs y los manda por el servicio."""
     cfg = version.configuration
@@ -443,7 +457,7 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
     for iv in pending:
         if version.inputs.unchanged(iv):
             continue
-        service.submit_input(actor, version, iv, spec.capability)
+        service.submit_input(actor, version, iv, CAPABILITY_FOR[iv.group])
         cambios += 1
     return cambios
 
@@ -487,8 +501,27 @@ def add_headcount_change(service, actor: str, version, task, form) -> None:
     service.submit_input(actor, version, iv, "budget.headcount.load")
 
 
-def remove_headcount_change(service, actor: str, version, movement_id: str) -> None:
-    service.remove_inputs(actor, version, movement_id)
+def remove_headcount_change(service, actor: str, version, movement_id: str,
+                            scope_key: str = "") -> None:
+    service.remove_inputs(actor, version, movement_id, scope_key=scope_key)
+
+
+def update_headcount_change(service, actor: str, version, movement_id: str, form) -> None:
+    """Corregir la cantidad autorizada sin perder la valorización.
+
+    Borrar y volver a pedir generaba una solicitud nueva y le tiraba abajo el
+    trabajo a Nómina; así, el importe se reajusta solo por regla de tres.
+    """
+    solicitud = next((iv for iv in version.inputs.values
+                      if iv.concept is Concept.HEADCOUNT_CHANGE
+                      and iv.movement_id == movement_id), None)
+    if solicitud is None:
+        raise ValueError("Esa solicitud ya no existe.")
+    corregida = solicitud.model_copy(deep=True)
+    corregida.value = Decimal(form["quantity"])
+    if form.get("comment") is not None:
+        corregida.comment = (form.get("comment") or "").strip() or None
+    service.submit_input(actor, version, corregida, "budget.headcount.load")
 
 
 def add_capex(service, actor: str, version, form) -> None:

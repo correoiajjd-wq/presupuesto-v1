@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>El presupuesto todavía se está armando</h1>
+<p class="sub">La configuración de <b>{{ budget.name }} · V{{ version.number }}</b> está abierta:
+el CFO todavía está definiendo la estructura, los productos y los circuitos. Hasta que la
+cierre no se generan las tareas de carga y no hay nada que puedas hacer acá.</p>
+
+<div class="panel">
+  <h3>Mientras tanto</h3>
+  <p class="small">Si estabas trabajando en otro presupuesto o en una versión anterior,
+  elegilo acá abajo y seguís donde estabas.</p>
+  {% if budgets|length > 1 %}
+  <form method="post" action="{{ url_for('seleccionar_presupuesto') }}" class="row" style="margin-top:10px">
+    <select name="budget_id" style="width:auto">
+      {% for b in budgets %}
+      <option value="{{ b.id }}" {{ 'selected' if b.id == budget.id }}>{{ b.name }}</option>
+      {% endfor %}
+    </select>
+    <button class="ghost">Cambiar de presupuesto</button>
+  </form>
+  {% endif %}
+  <form method="post" action="{{ url_for('seleccionar_version') }}" class="row" style="margin-top:10px">
+    <select name="version_id" style="width:auto">
+      {% for v in budget.versions.values()|sort(attribute='number') %}
+      <option value="{{ v.id }}" {{ 'selected' if v.id == version.id }}>
+        V{{ v.number }} — {{ v.status.value }}
+        {{ '(vigente)' if v.id == budget.current_version_id }}</option>
+      {% endfor %}
+    </select>
+    <button class="ghost">Ir a esa versión</button>
+  </form>
+</div>
+{% endblock %}

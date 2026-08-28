@@ -37,6 +37,7 @@ from ..services.import_export import commit_import, parse_sales_import, sales_te
 from ..services.scenarios import compare, run_scenario
 from .forms import (
     add_capex, add_headcount_change, apply_form, build_form, remove_headcount_change,
+    update_headcount_change,
 )
 
 
@@ -46,21 +47,33 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
 
     # ------------------------------------------------------------ contexto
     def budget():
-        bid = session.get("budget_id") or budget_id
+        u = service.users.get(session.get("user_id") or "")
+        propio = getattr(u, "budget_id", None)
+        bid = session.get("budget_id") or propio or budget_id
+        if propio and bid != propio:
+            bid = propio
         if bid not in service.budgets:
-            bid = budget_id
+            bid = propio or budget_id
         return service.budget(bid)
 
     def version():
         """La versión elegida manda: si pertenece a otro presupuesto, se cambia también
         el presupuesto activo. Presupuesto y versión nunca quedan desalineados."""
         vid = session.get("version_id")
+        propio = getattr(service.users.get(session.get("user_id") or ""), "budget_id", None)
         if vid:
             for bud in service.budgets.values():
-                if vid in bud.versions:
+                # Elegir una versión cambia también de presupuesto, salvo que
+                # el usuario pertenezca a uno: de ahí no sale.
+                if vid in bud.versions and not (propio and bud.id != propio):
                     session["budget_id"] = bud.id
                     return bud.versions[vid]
-        v = budget().latest
+        # Si hay una versión vigente, es ahí donde trabaja la empresa; la
+        # última creada puede ser un borrador que todavía nadie cerró.
+        bud = budget()
+        v = (bud.versions.get(bud.current_version_id or "")
+             if "budget.configuration.edit" not in service.auth.capabilities(user())
+             else None) or bud.latest
         session["version_id"] = v.id
         return v
 
@@ -75,6 +88,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
             "current_user": u,
             "version": v,
             "budget": budget(),
+            "budgets": list(service.budgets.values()),
             "Role": Role,
             "is_cfo": bool(u and Role.CFO in u.roles),
             # Quién puede qué sale de las capacidades, no de preguntar si es CFO.
@@ -123,13 +137,11 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         "configurar_borrar": "budget.configuration.edit",
         "cerrar_configuracion": "budget.configuration.close",
         "auditoria": "budget.review",
-        "versiones": "budget.review",
         "aprobar_version": "budget.version.approve",
         "nueva_version": "budget.version.create",
         "vigente": "budget.version.set_current",
         "nuevo": "budget.configuration.edit",
         "crear_presupuesto": "budget.configuration.edit",
-        "escenarios": "budget.scenario.run",
         "crear_escenario": "budget.scenario.run",
     }
 
@@ -167,8 +179,12 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def panel():
         u, v = user(), version()
         if v.configuration.status is not ConfigStatus.LOCKED:
-            # Doc 01 §5: no se puede empezar a cargar hasta cerrar la configuración.
-            return redirect(url_for("configurar"))
+            # Doc 01 §5: no se puede cargar hasta cerrar la configuración. Al
+            # que no configura no se lo manda al wizard —no puede entrar— sino
+            # a una pantalla que le dice qué está pasando.
+            if "budget.configuration.edit" in service.auth.capabilities(u):
+                return redirect(url_for("configurar"))
+            return render_template("esperando.html")
         tasks = service.tasks_for(v, u)
         if Role.CFO not in u.roles:
             return render_template("tareas.html", tasks=tasks, mine=True)
@@ -227,19 +243,32 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
 
     @app.post("/tareas/<task_id>/dotacion/<movement_id>/borrar")
     def borrar_dotacion(task_id, movement_id):
-        remove_headcount_change(service, session["user_id"], version(), movement_id)
+        v = version()
+        t = tarea(v, task_id, "PAYROLL_HEADCOUNT")
+        remove_headcount_change(service, session["user_id"], v, movement_id, t.scope_key)
         flash("Solicitud eliminada.", "ok")
+        return redirect(url_for("carga", task_id=task_id))
+
+    @app.post("/tareas/<task_id>/dotacion/<movement_id>")
+    def editar_dotacion(task_id, movement_id):
+        v = version()
+        tarea(v, task_id, "PAYROLL_HEADCOUNT")
+        update_headcount_change(service, session["user_id"], v, movement_id, request.form)
+        flash("Solicitud corregida. El importe se reajustó en la misma proporción.", "ok")
         return redirect(url_for("carga", task_id=task_id))
 
     @app.post("/tareas/<task_id>/capex")
     def capex(task_id):
-        add_capex(service, session["user_id"], version(), request.form)
+        v = version()
+        tarea(v, task_id, "CAPEX")
+        add_capex(service, session["user_id"], v, request.form)
         flash("Inversión registrada.", "ok")
         return redirect(url_for("carga", task_id=task_id))
 
     @app.post("/tareas/<task_id>/enviar")
     def enviar(task_id):
         v = version()
+        tarea(v, task_id)
         service.submit_task(session["user_id"], v, task_id)
         flash("Enviado a revisión.", "ok")
         return redirect(url_for("carga", task_id=task_id))
@@ -247,6 +276,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.post("/tareas/<task_id>/aprobar")
     def aprobar(task_id):
         v = version()
+        tarea(v, task_id)
         service.approve_task(session["user_id"], v, task_id)
         flash("Aprobado.", "ok")
         return redirect(request.referrer or url_for("panel"))
@@ -254,6 +284,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.post("/tareas/<task_id>/rechazar")
     def rechazar(task_id):
         v = version()
+        tarea(v, task_id)
         service.reject_task(session["user_id"], v, task_id, request.form.get("comment", ""))
         flash("Rechazado y devuelto al responsable.", "ok")
         return redirect(request.referrer or url_for("panel"))
@@ -286,13 +317,27 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         return redirect(url_for("carga", task_id=task_id))
 
     # ------------------------------------------------------------ reportes
+    def ambitos_visibles(v):
+        """Cada uno ve el resultado de lo suyo. El gerente de una sucursal no
+        tiene por qué ver el EBITDA consolidado de la empresa."""
+        u = user()
+        todos = reporting.scopes_of(v.configuration)
+        if not u.scopes:
+            return todos
+        return [x for x in todos if u.has_scope(x[0], v.configuration)]
+
     @app.get("/reportes/pnl")
     def pnl():
         v = version()
         cfg = v.configuration
         values = v.calculate()
-        scopes = reporting.scopes_of(cfg)
-        scope = request.args.get("scope", scope_co())
+        scopes = ambitos_visibles(v)
+        if not scopes:
+            flash("No tenés ningún ámbito asignado para ver reportes.", "error")
+            return redirect(url_for("panel"))
+        scope = request.args.get("scope", scopes[0][0])
+        if scope not in {x[0] for x in scopes}:
+            raise BudgetError("UNAUTHORIZED_SCOPE", "Ese ámbito no está en tu alcance.")
         mode = request.args.get("mode", "annual")
         return render_template(
             "pnl.html", scopes=scopes, scope=scope, mode=mode, values=values,
@@ -305,12 +350,16 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def ratios():
         v = version()
         values = v.calculate()
-        scope = request.args.get("scope", scope_co())
-        return render_template("ratios.html", scopes=reporting.scopes_of(v.configuration),
-                               scope=scope,
+        scopes = ambitos_visibles(v)
+        if not scopes:
+            flash("No tenés ningún ámbito asignado para ver reportes.", "error")
+            return redirect(url_for("panel"))
+        scope = request.args.get("scope", scopes[0][0])
+        if scope not in {x[0] for x in scopes}:
+            raise BudgetError("UNAUTHORIZED_SCOPE", "Ese ámbito no está en tu alcance.")
+        return render_template("ratios.html", scopes=scopes, scope=scope,
                                rows=reporting.ratio_report(v.configuration, values, scope),
-                               label=dict((s, n) for s, n, _ in reporting.scopes_of(
-                                   v.configuration)).get(scope, scope))
+                               label=dict((s, n) for s, n, _ in scopes).get(scope, scope))
 
     @app.get("/reportes/stock")
     def stock():
@@ -327,6 +376,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.post("/reportes/alertas/<int:index>")
     def resolver_alerta(index):
         v = version()
+        if not 0 <= index < len(v.alerts):
+            raise BudgetError("NOT_FOUND", "Esa alerta ya no existe.")
         service.resolve_alert(session["user_id"], v, index, request.form.get("comment", ""),
                               accept=bool(request.form.get("accept")))
         flash("Alerta registrada.", "ok")
@@ -428,6 +479,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
 
     @app.post("/configurar/<step>/<action>")
     def configurar_accion(step, action):
+        if step not in wizard.STEP_BY_KEY:
+            raise BudgetError("NOT_FOUND", f"El paso {step} no existe.")
         v, u = version(), user()
         service.auth.check(u, "budget.configuration.edit")
         if not wizard.can_edit_step(u, wizard.STEP_BY_KEY[step]):
@@ -445,10 +498,14 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
             "rubro": wizard.add_balance_item, "ratios": wizard.update_ratios,
             "workflow": wizard.update_workflow,
         }
-        if action == "usuario":
-            wizard.add_user(service, v, request.form)
-        elif action == "borrar_usuario":
-            wizard.remove_user(service, request.form["user_id"])
+        if action in ("usuario", "borrar_usuario"):
+            if step != "workflow":
+                raise BudgetError("NOT_FOUND", "Los responsables se definen en el paso workflow.")
+            wizard.assert_open(v)
+            if action == "usuario":
+                wizard.add_user(service, v, request.form, budget().id)
+            else:
+                wizard.remove_user(service, request.form["user_id"])
         elif action in handlers:
             handlers[action](v, request.form)
         elif action == "rubros_default":
@@ -465,6 +522,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
 
     @app.post("/configurar/<step>/borrar/<kind>/<path:entity_id>")
     def configurar_borrar(step, kind, entity_id):
+        if step not in wizard.STEP_BY_KEY:
+            raise BudgetError("NOT_FOUND", f"El paso {step} no existe.")
         v, u = version(), user()
         service.auth.check(u, "budget.configuration.edit")
         if not wizard.can_edit_step(u, wizard.STEP_BY_KEY[step]):
@@ -522,18 +581,6 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def seleccionar_version():
         session["version_id"] = request.form["version_id"]
         return redirect(request.referrer or url_for("panel"))
-
-    @app.post("/versiones/aprobar-todo")
-    def aprobar_todo():
-        """Atajo de demostración: aprueba todas las tareas pendientes."""
-        v = version()
-        u = user()
-        if Role.CFO not in u.roles:
-            raise BudgetError("UNAUTHORIZED", "Sólo el CFO puede hacer esto.")
-        for t in v.tasks.values():
-            t.status = TaskStatus.APPROVED
-        flash("Todas las tareas quedaron aprobadas (atajo de demostración).", "ok")
-        return redirect(url_for("versiones"))
 
     return app
 

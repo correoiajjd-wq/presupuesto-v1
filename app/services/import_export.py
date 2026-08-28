@@ -96,6 +96,8 @@ def sales_template(version: BudgetVersion, operation_id: str) -> bytes:
     ws.freeze_panes = "A2"
 
     info = wb.create_sheet("Instrucciones")
+    info["A20"] = "OPERACION"
+    info["B20"] = operation_id
     info["A1"] = "Instrucciones de carga"
     info["A1"].font = Font(bold=True, size=13)
     lines = [
@@ -124,8 +126,23 @@ def parse_sales_import(version: BudgetVersion, data: bytes, operation_id: str,
     errors: list[ImportError_] = []
     parsed: list[InputValue] = []
 
-    wb = load_workbook(BytesIO(data), data_only=True)
+    try:
+        wb = load_workbook(BytesIO(data), data_only=True)
+    except Exception:
+        return ImportResult("REJECTED", 0, [ImportError_(
+            0, "archivo", "", "El archivo no es una planilla Excel válida",
+            "Descargá la plantilla desde el sistema, completala y subila sin convertirla.")]), []
     ws = wb["Carga"] if "Carga" in wb.sheetnames else wb.active
+
+    # La plantilla lleva marcada su operación: sin esto, la planilla de una
+    # sucursal entraba en la tarea de otra y le pisaba las ventas.
+    marca = wb["Instrucciones"]["B20"].value if "Instrucciones" in wb.sheetnames else None
+    if marca and str(marca).strip() != operation_id:
+        return ImportResult("REJECTED", 0, [ImportError_(
+            0, "archivo", str(marca),
+            f"Esta planilla es de {cfg.operation_label(str(marca).strip())}",
+            f"Subí la planilla de {cfg.operation_label(operation_id)}, "
+            "o descargala de nuevo desde esta tarea.")]), []
     headers = [str(c.value or "").strip().upper() for c in ws[1]]
     try:
         i_code = headers.index("CODIGO")
@@ -196,6 +213,16 @@ def parse_sales_import(version: BudgetVersion, data: bytes, operation_id: str,
         ))
 
     if errors:
+        return ImportResult("REJECTED", 0, errors), []
+    esperadas = sum(1 for product in unit.products
+                    for head, bucket in fy.iter_buckets(product.sales_frequency)
+                    if any(cfg.is_active(op, p) and cfg.is_active(unit, p)
+                           and cfg.is_active(cfg.branch(op.branch_id), p) for p in bucket))
+    if len(parsed) < esperadas:
+        errors.append(ImportError_(
+            0, "archivo", str(len(parsed)),
+            f"La planilla trae {len(parsed)} filas y la operación tiene {esperadas}",
+            "No borres filas: si un producto no se vende en un período, cargá 0."))
         return ImportResult("REJECTED", 0, errors), []
     return ImportResult("COMMITTED", len(parsed)), parsed
 

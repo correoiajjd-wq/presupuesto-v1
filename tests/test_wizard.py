@@ -389,8 +389,8 @@ class WizardCase(unittest.TestCase):
         self.assertNotIn(">Aprobar<", html)
         r = coo.post(f"/tareas/{t_ventas.id}/rechazar",
                      data={"comment": "autorizo 6, no 10"}, follow_redirects=True)
-        self.assertEqual(t_ventas.status, TaskStatus.DRAFT)
-        self.assertIn("autorizo 6", str(t_ventas.history))
+        self.assertEqual(t_ventas.status, TaskStatus.REJECTED)
+        self.assertEqual(t_ventas.rejection, "autorizo 6, no 10")
 
     def test_un_gerente_no_ve_el_wizard(self):
         gerente = create_web_app(self.service, self.budget.id).test_client()

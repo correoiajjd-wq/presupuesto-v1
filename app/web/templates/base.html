@@ -75,15 +75,16 @@ padding:16px 0 0;margin-top:8px}
     <a href="{{ url_for('ratios') }}" class="{{ 'on' if request.endpoint=='ratios' }}">Ratios</a>
     {% if version.configuration.inventory.enabled %}
     <a href="{{ url_for('stock') }}" class="{{ 'on' if request.endpoint=='stock' }}">Stock</a>{% endif %}
-    <a href="{{ url_for('escenarios') }}" class="{{ 'on' if request.endpoint=='escenarios' }}">Escenarios</a>
+    {% if 'budget.scenario.run' in caps %}
+    <a href="{{ url_for('escenarios') }}" class="{{ 'on' if request.endpoint=='escenarios' }}">Escenarios</a>{% endif %}
     <a href="{{ url_for('alertas') }}" class="{{ 'on' if request.endpoint=='alertas' }}">Alertas</a>
     {% endif %}
-    {% if is_cfo or Role.COO in current_user.roles %}
+    {% if 'budget.configuration.edit' in caps %}
     <a href="{{ url_for('configurar') }}" class="{{ 'on' if request.endpoint=='configurar' }}">Configurar</a>
     {% endif %}
-    {% if is_cfo %}
     <a href="{{ url_for('presupuestos') }}" class="{{ 'on' if request.endpoint in ('presupuestos','nuevo') }}">Presupuestos</a>
     <a href="{{ url_for('versiones') }}" class="{{ 'on' if request.endpoint=='versiones' }}">Versiones</a>
+    {% if 'budget.review' in caps %}
     <a href="{{ url_for('auditoria') }}" class="{{ 'on' if request.endpoint=='auditoria' }}">Auditoría</a>
     {% endif %}
   </nav>

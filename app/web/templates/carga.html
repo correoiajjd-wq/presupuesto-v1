@@ -1,5 +1,8 @@
 {% extends "base.html" %}{% block title %}{{ spec.title }}{% endblock %}
 {% block body %}
+{% if task.status.value == 'REJECTED' and task.rejection %}
+<div class="flash error">Te devolvieron esta tarea: {{ task.rejection }}</div>
+{% endif %}
 <h1>{{ spec.title }}</h1>
 <p class="sub">{{ spec.intro }}</p>
 
@@ -103,7 +106,14 @@
     <tr>
       <td>{{ {'HIRED':'Alta','TERMINATED':'Baja','ADJUSTMENT':'Ajuste'}[m.change_type.value] }}</td>
       <td class="small">{{ m.comment or '—' }}</td>
-      <td>{{ '—' if m.change_type.value == 'ADJUSTMENT' else m.value|money }}</td>
+      <td>{% if m.change_type.value == 'ADJUSTMENT' %}—{% else %}
+        <form method="post" action="{{ url_for('editar_dotacion', task_id=task.id,
+                                               movement_id=m.movement_id) }}" class="row"
+              style="justify-content:flex-end;gap:5px;flex-wrap:nowrap">
+          <input type="number" name="quantity" value="{{ m.value|int }}" min="1"
+                 style="width:70px">
+          <button class="ghost" style="padding:2px 8px">ok</button>
+        </form>{% endif %}</td>
       <td>{{ m.effective_date }}</td>
       <td>{% if spec.extra.valores.get(m.movement_id) is not none %}
         {{ spec.extra.valores[m.movement_id]|money }} {{ spec.extra.currency }}
@@ -145,10 +155,12 @@
     {% endfor %}
     </tbody></table>
   {% endif %}
+  {% if puedo_cargar %}
   <div class="sticky-actions row">
     <form method="post" action="{{ url_for('enviar', task_id=task.id) }}">
       <button class="ghost">Enviar a revisión</button></form>
   </div>
+  {% endif %}
 </div>
 {% endif %}
 
