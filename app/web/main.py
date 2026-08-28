@@ -67,13 +67,6 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def user():
         uid = session.get("user_id")
         return service.users.get(uid) if uid else None
-
-    def require_user():
-        u = user()
-        if u is None:
-            return None
-        return u
-
     @app.context_processor
     def inject():
         u = user()
@@ -115,11 +108,44 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         flash(str(err), "error")
         return redirect(request.referrer or url_for("panel"))
 
+    @app.errorhandler(ArithmeticError)
+    def handle_number(err: ArithmeticError):
+        """decimal.InvalidOperation no es ValueError: un importe vacío llegaba
+        hasta el 500 sin que ningún handler lo viera."""
+        flash("Ese importe no es un número.", "error")
+        return redirect(request.referrer or url_for("panel"))
+
+    #: Qué capacidad hace falta para entrar a cada pantalla. Sin esto el
+    #: control vive en la plantilla y basta con escribir la URL a mano.
+    REQUIERE = {
+        "configurar": "budget.configuration.edit",
+        "configurar_accion": "budget.configuration.edit",
+        "configurar_borrar": "budget.configuration.edit",
+        "cerrar_configuracion": "budget.configuration.close",
+        "auditoria": "budget.review",
+        "versiones": "budget.review",
+        "aprobar_version": "budget.version.approve",
+        "nueva_version": "budget.version.create",
+        "vigente": "budget.version.set_current",
+        "nuevo": "budget.configuration.edit",
+        "crear_presupuesto": "budget.configuration.edit",
+        "escenarios": "budget.scenario.run",
+        "crear_escenario": "budget.scenario.run",
+    }
+
     @app.before_request
     def guard():
         allowed = {"login", "do_login", "static"}
-        if request.endpoint not in allowed and user() is None:
+        if request.endpoint in allowed:
+            return None
+        u = user()
+        if u is None:
             return redirect(url_for("login"))
+        capacidad = REQUIERE.get(request.endpoint or "")
+        if capacidad and capacidad not in service.auth.capabilities(u):
+            flash(f"UNAUTHORIZED: {u.name} no tiene acceso a esta pantalla.", "error")
+            return redirect(url_for("panel"))
+        return None
 
     # ------------------------------------------------------------ acceso
     @app.get("/login")
@@ -163,16 +189,29 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
                                mine=False)
 
     # ------------------------------------------------------------ carga
+    def tarea(v, task_id, concept: str = ""):
+        task = v.tasks.get(task_id)
+        if task is None:
+            raise BudgetError("NOT_FOUND", "Esa tarea no existe en esta versión.")
+        if concept and task.concept != concept:
+            raise BudgetError("NOT_FOUND", f"Esa tarea no es de {concept.lower()}.")
+        u = user()
+        propia = {task.loader_role, task.reviewer_role, task.approver_role} & u.roles
+        if not (propia and u.has_scope(task.scope_key, v.configuration)):
+            raise BudgetError("UNAUTHORIZED_SCOPE",
+                              f"{u.name} no participa de la tarea {task.label}.")
+        return task
+
     @app.get("/tareas/<task_id>")
     def carga(task_id):
         v = version()
-        task = v.tasks[task_id]
+        task = tarea(v, task_id)
         return render_template("carga.html", task=task, spec=build_form(v, task))
 
     @app.post("/tareas/<task_id>")
     def guardar(task_id):
         v = version()
-        task = v.tasks[task_id]
+        task = tarea(v, task_id)
         n = apply_form(service, session["user_id"], v, task, request.form.to_dict())
         flash(f"{n} valores guardados como borrador." if n
               else "No había nada para guardar: los valores ya estaban así.", "ok")
@@ -181,7 +220,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.post("/tareas/<task_id>/dotacion")
     def dotacion(task_id):
         v = version()
-        add_headcount_change(service, session["user_id"], v, v.tasks[task_id], request.form)
+        add_headcount_change(service, session["user_id"], v,
+                             tarea(v, task_id, "PAYROLL_HEADCOUNT"), request.form)
         flash("Solicitud registrada. Nómina tiene que ponerle el valor.", "ok")
         return redirect(url_for("carga", task_id=task_id))
 
@@ -222,7 +262,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.get("/tareas/<task_id>/plantilla")
     def plantilla(task_id):
         v = version()
-        task = v.tasks[task_id]
+        task = tarea(v, task_id, "SALES")
         operation_id = task.scope_key.split(":", 1)[1]
         return send_file(BytesIO(sales_template(v, operation_id)), as_attachment=True,
                          download_name=f"ventas_{operation_id}.xlsx",
@@ -232,7 +272,7 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     @app.post("/tareas/<task_id>/importar")
     def importar(task_id):
         v = version()
-        task = v.tasks[task_id]
+        task = tarea(v, task_id, "SALES")
         operation_id = task.scope_key.split(":", 1)[1]
         file = request.files.get("file")
         if not file or not file.filename:
@@ -283,6 +323,14 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def alertas():
         v = version()
         return render_template("alertas.html", report=service.validate_version(v))
+
+    @app.post("/reportes/alertas/<int:index>")
+    def resolver_alerta(index):
+        v = version()
+        service.resolve_alert(session["user_id"], v, index, request.form.get("comment", ""),
+                              accept=bool(request.form.get("accept")))
+        flash("Alerta registrada.", "ok")
+        return redirect(url_for("alertas"))
 
     @app.get("/reportes/auditoria")
     def auditoria():
@@ -419,6 +467,9 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
     def configurar_borrar(step, kind, entity_id):
         v, u = version(), user()
         service.auth.check(u, "budget.configuration.edit")
+        if not wizard.can_edit_step(u, wizard.STEP_BY_KEY[step]):
+            raise BudgetError("UNAUTHORIZED",
+                              f"Este paso lo define {wizard.STEP_BY_KEY[step].owner.value}.")
         wizard.remove(v, kind, entity_id)
         service.audit.record(actor=session["user_id"], action="ConfigurationDeleted",
                              entity_type=kind.upper(), entity_id=entity_id, version_id=v.id,

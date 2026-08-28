@@ -20,7 +20,9 @@ from .budget import BudgetError, BudgetVersion, Scenario, ScenarioAdjustment
 CONCEPT_TARGETS: dict[str, tuple[Concept, ...]] = {
     "SALES": (Concept.SALES_QTY, Concept.SALES_AMOUNT),
     "EXPENSES": (Concept.EXPENSE_AMOUNT,),
-    "PAYROLL": (Concept.INITIAL_HEADCOUNT, Concept.HEADCOUNT_CHANGE, Concept.COMMISSION_AMOUNT),
+    # Un escenario de nómina mueve plata, no personas: escalar la dotación
+    # daría 27,6 empleados y el costo lo pone el nominal, no la cantidad.
+    "PAYROLL": (Concept.NOMINAL_SALARY, Concept.COMMISSION_AMOUNT),
     "PURCHASES": (Concept.PURCHASES,),
     "CAPEX": (Concept.CAPEX_AMOUNT,),
     "COST": (),  # actúa sobre el supuesto de margen, no sobre un input cargado
@@ -45,17 +47,21 @@ def apply_overlay(cfg: Configuration, inputs: InputSet,
     new_cfg = cfg.model_copy(deep=True)
     new_inputs = inputs.model_copy(deep=True)
 
-    # Los inputs cargados en una operación llevan sólo operation_id: se
-    # completan la unidad y la sucursal para poder filtrar por cualquiera.
+    # Un input puede venir identificado sólo por su operación o sólo por su
+    # centro de costo. Para poder filtrar por unidad o por sucursal hay que
+    # resolver los dos caminos, o el ajuste acotado no encuentra nada.
     for iv in new_inputs.values:
-        if not iv.operation_id:
+        operacion = None
+        if iv.operation_id:
+            operacion = next((o for o in cfg.operations if o.id == iv.operation_id), None)
+        elif iv.cost_center_id:
+            kind, owner = cfg.cost_center_owner(iv.cost_center_id)
+            operacion = owner if kind == "OPERATION" else None
+        if operacion is None:
             continue
-        try:
-            op = cfg.operation(iv.operation_id)
-        except Exception:
-            continue
-        iv.business_unit_id = iv.business_unit_id or op.business_unit_id
-        iv.branch_id = iv.branch_id or op.branch_id
+        iv.operation_id = iv.operation_id or operacion.id
+        iv.business_unit_id = iv.business_unit_id or operacion.business_unit_id
+        iv.branch_id = iv.branch_id or operacion.branch_id
 
     for adj in adjustments:
         if adj.concept not in CONCEPT_TARGETS:

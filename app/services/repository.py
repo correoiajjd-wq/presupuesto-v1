@@ -98,7 +98,7 @@ def fx_from_dict(data: dict) -> FXTable:
 
 class Repository:
     def __init__(self, path: str | Path = ":memory:"):
-        self.conn = sqlite3.connect(str(path))
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
 
@@ -133,12 +133,21 @@ class Repository:
                                    "approver_role": t.approver_role.value}
                             for t in v.tasks.values()})),
                 )
+                vigentes = [iv.identity() for iv in v.inputs.values]
                 for iv in v.inputs.values:
                     self.conn.execute(
                         "INSERT INTO input_value (version_id, identity, payload) VALUES (?,?,?) "
                         "ON CONFLICT(version_id, identity) DO UPDATE SET payload=excluded.payload",
                         (v.id, iv.identity(), iv.model_dump_json()),
                     )
+                # Sin esto, lo que se borró en memoria vuelve a aparecer al
+                # recargar: la base guardaba altas y nunca bajas.
+                marcas = ",".join("?" * len(vigentes))
+                self.conn.execute(
+                    f"DELETE FROM input_value WHERE version_id=? AND identity NOT IN ({marcas})"
+                    if vigentes else "DELETE FROM input_value WHERE version_id=?",
+                    (v.id, *vigentes),
+                )
             for ev in (audit or []):
                 self.conn.execute(
                     "INSERT INTO audit_event (at, actor, action, entity_type, entity_id, "

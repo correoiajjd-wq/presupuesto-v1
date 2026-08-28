@@ -17,10 +17,12 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
+from pydantic import ValidationError
+from werkzeug.exceptions import HTTPException
 from flask import Flask, jsonify, request, send_file
 from io import BytesIO
 
-from ..domain.config import Configuration
+from ..domain.config import ConfigurationError, Configuration
 from ..domain.engine import FY, scope_co
 from ..domain.graph import nk
 from ..domain.inputs import Concept, InputValue
@@ -77,12 +79,42 @@ def create_app(service: BudgetService) -> Flask:
                 return b, b.versions[version_id]
         raise BudgetError("NOT_FOUND", f"versión {version_id} inexistente")
 
+    def _error(code: str, message: str, status: int, details=None):
+        return jsonify({"error": {
+            "code": code, "message": message, "details": _j(details or {}),
+            "correlation_id": request.headers.get("X-Correlation-ID"),
+        }}), status
+
     @app.errorhandler(BudgetError)
     def _handle(err: BudgetError):
-        return jsonify({"error": {
-            "code": err.code, "message": str(err), "details": _j(err.details),
-            "correlation_id": request.headers.get("X-Correlation-ID"),
-        }}), HTTP_STATUS.get(err.code, 400)
+        return _error(err.code, str(err), HTTP_STATUS.get(err.code, 400), err.details)
+
+    @app.errorhandler(KeyError)
+    def _handle_missing_field(err: KeyError):
+        return _error("MISSING_FIELD", f"falta el campo {err}", 400)
+
+    @app.errorhandler(ConfigurationError)
+    def _handle_config(err: ConfigurationError):
+        return _error(err.code, str(err), 404)
+
+    @app.errorhandler(ValidationError)
+    def _handle_model(err: ValidationError):
+        return _error("INPUT_VALIDATION_FAILED", "cuerpo inválido", 422,
+                      {"errors": [e.get("msg", "") for e in err.errors()[:5]]})
+
+    @app.errorhandler(ValueError)
+    def _handle_value(err: ValueError):
+        return _error("INVALID_VALUE", str(err), 400)
+
+    @app.errorhandler(ArithmeticError)
+    def _handle_number(err: ArithmeticError):
+        return _error("INVALID_VALUE", "un importe no es un número", 400)
+
+    @app.errorhandler(HTTPException)
+    def _handle_http(err: HTTPException):
+        """Un cuerpo ausente o mal formado lo rechaza Flask antes de llegar acá:
+        el contrato de errores tiene que valer también para eso."""
+        return _error("BAD_REQUEST", err.description or err.name, err.code or 400)
 
     # ------------------------------------------------------------ catálogos
     @app.get("/api/v1/ratio-catalog")

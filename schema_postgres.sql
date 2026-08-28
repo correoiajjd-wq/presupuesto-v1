@@ -97,9 +97,13 @@ CREATE TABLE input_value (
     product_id      TEXT,
     family_id       TEXT,
     expense_id      TEXT,
-    area_id         TEXT,
+    cost_center_id  TEXT,
     capex_category_id TEXT,
     balance_item_id TEXT,
+    -- Identifica la solicitud de dotación que Nómina valoriza. Sin esto, la
+    -- foto inicial de un centro de costo y el valor de cada solicitud colisionan
+    -- en la misma clave.
+    movement_id     TEXT,
     period          CHAR(7),                  -- 'YYYY-MM', período de carga
     effective_date  DATE,
     change_type     TEXT,
@@ -112,8 +116,8 @@ CREATE TABLE input_value (
     loaded_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     comment         TEXT,
     UNIQUE (version_id, concept, scope_type, scope_id, product_id, family_id,
-            expense_id, area_id, capex_category_id, balance_item_id, period,
-            effective_date, change_type)
+            expense_id, cost_center_id, capex_category_id, balance_item_id,
+            movement_id, period, effective_date, change_type)
 );
 CREATE INDEX ix_input_version_concept ON input_value (version_id, concept);
 CREATE INDEX ix_input_scope ON input_value (version_id, scope_type, scope_id);
@@ -148,6 +152,9 @@ CREATE TABLE task (
     status          task_status NOT NULL DEFAULT 'NOT_STARTED',
     assignee_id     UUID REFERENCES app_user(id),
     due_date        DATE
+    loader_role     TEXT NOT NULL,
+    reviewer_role   TEXT NOT NULL,
+    approver_role   TEXT NOT NULL,
 );
 
 CREATE TABLE task_transition (

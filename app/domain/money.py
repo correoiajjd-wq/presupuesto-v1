@@ -54,11 +54,6 @@ class Money:
                 f"No se pueden operar monedas distintas sin convertir: "
                 f"{self.currency} vs {other.currency}"
             )
-
-    def rounded(self) -> "Money":
-        return Money(money_round(self.amount), self.currency)
-
-
 class FXConvention(str, Enum):
     """Qué TC usar cuando un valor mensual se convierte."""
 
@@ -103,11 +98,6 @@ class FXTable:
         while day <= end:
             self.add(currency, day, rate_to_presentation)
             day += timedelta(days=1)
-
-    def add_series(self, currency: str, series: dict[date, Decimal]) -> None:
-        for day, rate in series.items():
-            self.add(currency, day, rate)
-
     # -- consulta ----------------------------------------------------------
     def rate_on(self, currency: str, day: date) -> Decimal:
         c = currency.upper()

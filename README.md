@@ -4,12 +4,12 @@ Implementación funcionando de la parte que decide si el sistema sirve o no:
 **configuración → inputs → grafo de dependencias → cálculo → validación → workflow → versión**.
 
 No es el producto terminado. Es el motor, con la cadena completa andando de punta a punta
-sobre una empresa demo, y 101 tests que verifican reglas concretas del spec.
+sobre una empresa demo, y 133 tests que verifican reglas concretas del spec.
 
 ```
 PYTHONPATH=. python3 wsgi.py                           # interfaz web en :8000
 PYTHONPATH=. python3 run_demo.py --html reporte.html   # recorrido end-to-end por consola
-PYTHONPATH=. python3 -m unittest discover -s tests     # 101 tests
+PYTHONPATH=. python3 -m unittest discover -s tests     # 133 tests
 ```
 
 ---
@@ -46,7 +46,7 @@ ratios personalizados, alta de productos durante el ejercicio.
 
 **1. El grafo de dependencias es real, no un diagrama.**
 Cada número del presupuesto es un nodo `MÉTRICA|ÁMBITO|PERÍODO` con sus dependencias
-declaradas. La demo genera ~3.200 nodos y ~6.400 aristas. De ahí salen tres cosas que
+declaradas. La demo genera ~5.400 nodos y ~11.000 aristas. De ahí salen tres cosas que
 de otro modo hay que programar a mano una y otra vez:
 
 - *Recálculo incremental*: cambia un input → clausura hacia adelante → sólo se recalcula
@@ -85,7 +85,9 @@ Los reportes explicitan supuestos, faltantes y conceptos no configurados.
 
 ## Reglas del spec que quedaron verificadas por test
 
-Cada test cita el parágrafo que verifica (`tests/test_rules.py`, `tests/test_api_persistence.py`).
+Cada test cita la regla que verifica: `tests/test_rules.py` (dominio y servicios),
+`tests/test_wizard.py` (el wizard y los formularios, simulando un navegador) y
+`tests/test_api_persistence.py` (API y persistencia).
 Las que más costó dejar bien:
 
 - **Vigencia parcial + frecuencia.** Una sucursal que abre en junio y un producto de carga
@@ -352,7 +354,7 @@ app/services/   budget (versión, workflow, aprobación, auditoría, autorizaci�
 app/api/        main.py (REST)
 app/web/        main.py · forms.py · templates/  (interfaz)
 seed/           demo.py (empresa completa) · report_html.py
-tests/          test_rules.py · test_api_persistence.py
+tests/          test_rules.py · test_wizard.py · test_api_persistence.py
 schema_postgres.sql
 run_demo.py
 ```

@@ -94,8 +94,14 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
     fy = cfg.fiscal_year
     valid_periods = {p.code for p in fy.periods}
 
+    sin_periodo = (Concept.INITIAL_HEADCOUNT, Concept.NOMINAL_SALARY, Concept.OPENING_STOCK,
+                   Concept.HEADCOUNT_CHANGE, Concept.BALANCE_OPENING, Concept.BALANCE_PROJECTED)
     for iv in inputs.values:
         tag = f"{iv.concept.value} {iv.scope_key}"
+        if iv.period is None and iv.concept not in sin_periodo:
+            out.append(Finding("MISSING_REQUIRED_INPUT",
+                               f"{tag}: falta el período de carga", Severity.BLOCKING, tag))
+            continue
         if iv.period is not None:
             if iv.period not in valid_periods:
                 out.append(Finding("INVALID_PERIOD",
@@ -129,6 +135,16 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
             except Exception as exc:
                 out.append(Finding("INVALID_EXPENSE", f"{tag}: {exc}", Severity.BLOCKING, tag))
                 continue
+            # El motor sólo lee los destinos configurados: un importe cargado
+            # en otro ámbito no llega a ningún total.
+            destinos = ([t.scope_key for t in ed.targets]
+                        if ed.allocation_mode is AllocationMode.PER_TARGET else ["CO"])
+            if iv.scope_key not in destinos:
+                out.append(Finding(
+                    "INVALID_EXPENSE_SCOPE",
+                    f"{tag}: {ed.name} no se imputa a {cfg.scope_label(iv.scope_key)}. "
+                    f"Destinos: {', '.join(cfg.scope_label(d) for d in destinos)}",
+                    Severity.BLOCKING, tag))
             head = fy.bucket_head(Period.parse(iv.period), ed.frequency)
             if Period.parse(iv.period) != head:
                 out.append(Finding(
@@ -165,7 +181,33 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
                 out.append(Finding("INVALID_VALUE", f"{tag}: valor negativo",
                                    Severity.BLOCKING, tag))
 
+        if iv.concept is Concept.COMMISSION_AMOUNT:
+            kind = iv.scope_key.split(":", 1)[0]
+            if kind not in ("OP", "SU"):
+                out.append(Finding(
+                    "INVALID_PAYROLL_SCOPE",
+                    f"{tag}: la comisión se carga en una operación o en un área de soporte",
+                    Severity.BLOCKING, tag))
+            elif kind == "OP":
+                unidad = cfg.operation_unit(iv.scope_key.split(":", 1)[1])
+                if any(p.commission_rate for p in unidad.products):
+                    out.append(Finding(
+                        "COMMISSION_IS_CALCULATED",
+                        f"{tag}: {unidad.name} tiene productos con tasa de comisión, así que "
+                        "la comisión la calcula el sistema sobre las ventas y no se carga",
+                        Severity.BLOCKING, tag))
+
         if iv.concept in (Concept.OPENING_STOCK, Concept.PURCHASES):
+            niveles = {"COMPANY": ["CO"],
+                       "BUSINESS_UNIT": [f"BU:{u.id}" for u in cfg.business_units],
+                       "OPERATION": [f"OP:{o.id}" for o in cfg.operations]}
+            if cfg.inventory.enabled and iv.scope_key not in niveles[cfg.inventory.level.value]:
+                out.append(Finding(
+                    "INVALID_STOCK_SCOPE",
+                    f"{tag}: el stock se administra a nivel "
+                    f"{cfg.inventory.level.value.lower()}; cargado en "
+                    f"{cfg.scope_label(iv.scope_key)} no se computa",
+                    Severity.BLOCKING, tag))
             if not cfg.inventory.enabled:
                 out.append(Finding("MODULE_NOT_CONFIGURED",
                                    f"{tag}: stock no está configurado", Severity.BLOCKING, tag))
@@ -278,12 +320,7 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                     Severity.BLOCKING, f"CC:{iv.cost_center_id}"))
 
     if "OPENING_STOCK" in required and cfg.inventory.enabled:
-        levels = {
-            "COMPANY": [scope_co()],
-            "BUSINESS_UNIT": [scope_bu(u.id) for u in cfg.business_units],
-            "OPERATION": [scope_op(o.id) for o in cfg.operations],
-        }[cfg.inventory.level.value]
-        for scope in levels:
+        for scope in _stock_scopes(cfg):
             fams = _families_for_scope(cfg, scope)
             for fam in fams:
                 if not any(iv.concept is Concept.OPENING_STOCK and iv.scope_key == scope
@@ -293,16 +330,46 @@ def missing_required_inputs(cfg: Configuration, inputs: InputSet) -> list[Findin
                         f"Stock inicial: falta familia {fam} en {cfg.scope_label(scope)}",
                         Severity.BLOCKING, scope))
 
+    if "PURCHASES" in required and cfg.inventory.enabled:
+        for scope in _stock_scopes(cfg):
+            for fam in _families_for_scope(cfg, scope):
+                for head, _ in fy.iter_buckets(cfg.inventory.frequency):
+                    if not any(iv.concept is Concept.PURCHASES and iv.scope_key == scope
+                               and iv.family_id == fam and iv.period == head.code
+                               for iv in inputs.values):
+                        out.append(Finding(
+                            "MISSING_REQUIRED_INPUT",
+                            f"Compras: falta la familia {fam} en {cfg.scope_label(scope)} "
+                            f"para {head.code}",
+                            Severity.BLOCKING, scope))
+
+    if "CAPEX" in required and cfg.capex.enabled:
+        # No se puede saber cuántas inversiones planea una empresa; lo que sí
+        # se puede exigir es que lo diga, aunque sea con un cero.
+        if not any(iv.concept is Concept.CAPEX_AMOUNT for iv in inputs.values):
+            out.append(Finding("MISSING_REQUIRED_INPUT",
+                               "CAPEX: no hay ninguna inversión cargada. Si no hay inversión "
+                               "prevista, cargá una línea en 0.",
+                               Severity.BLOCKING, "CAPEX"))
+
     if "BALANCE" in required and cfg.balance.enabled:
         for item in cfg.balance.items:
             if item.source is BalanceSource.CALCULATED:
                 continue
-            if not any(iv.concept is Concept.BALANCE_OPENING and iv.balance_item_id == item.id
-                       for iv in inputs.values):
-                out.append(Finding("MISSING_REQUIRED_INPUT",
-                                   f"Balance inicial: falta el rubro {item.name}",
-                                   Severity.BLOCKING, f"BI:{item.id}"))
+            for concepto, cuando in ((Concept.BALANCE_OPENING, "inicial"),
+                                     (Concept.BALANCE_PROJECTED, "proyectado")):
+                if not any(iv.concept is concepto and iv.balance_item_id == item.id
+                           for iv in inputs.values):
+                    out.append(Finding("MISSING_REQUIRED_INPUT",
+                                       f"Balance {cuando}: falta el rubro {item.name}",
+                                       Severity.BLOCKING, f"BI:{item.id}"))
     return out
+
+
+def _stock_scopes(cfg: Configuration) -> list[str]:
+    return {"COMPANY": [scope_co()],
+            "BUSINESS_UNIT": [scope_bu(u.id) for u in cfg.business_units],
+            "OPERATION": [scope_op(o.id) for o in cfg.operations]}[cfg.inventory.level.value]
 
 
 def _families_for_scope(cfg: Configuration, scope: str) -> list[str]:

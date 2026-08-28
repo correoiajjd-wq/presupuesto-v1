@@ -16,6 +16,13 @@ las alertas informan y permiten continuar.</p>
 <table><thead><tr><th>Alerta</th><th>Origen</th><th>Estado</th></tr></thead><tbody>
 {% for a in report.alerts %}
 <tr><td>{{ a.message }}</td><td class="small">{{ a.code }}</td>
+  <td>{% if 'budget.alert.resolve' in caps and a.status.value == 'PENDING' %}
+    <form method="post" action="{{ url_for('resolver_alerta', index=loop.index0) }}" class="row">
+      <input type="text" name="comment" placeholder="Comentario" style="width:200px">
+      <button class="ghost" style="padding:2px 9px">resolver</button>
+      <button class="ghost" style="padding:2px 9px" name="accept" value="1">aceptar</button>
+    </form>
+  {% elif a.comment %}<span class="small">{{ a.status.value }}: {{ a.comment }}</span>{% endif %}</td>
 <td><span class="tag warn">{{ a.status.value|lower }}</span></td></tr>
 {% endfor %}
 </tbody></table>

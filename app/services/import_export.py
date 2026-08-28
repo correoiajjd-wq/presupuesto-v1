@@ -205,11 +205,20 @@ def commit_import(service, actor: str, version: BudgetVersion,
     """Commit atómico: si algo falla, no queda nada escrito."""
     version.assert_mutable()
     snapshot = version.inputs.model_copy(deep=True)
+    estados = {t.id: (t.status, len(t.history)) for t in version.tasks.values()}
+    eventos = len(service.audit.events)
     try:
         for iv in parsed:
             service.submit_input(actor, version, iv, capability="budget.sales.load")
     except Exception as exc:
+        # "O todo o nada" vale también para las aprobaciones que la carga
+        # invalidó y para los eventos de auditoría de cambios que no ocurrieron.
         version.inputs = snapshot
         version.invalidate()
+        for t in version.tasks.values():
+            if t.id in estados:
+                t.status, hasta = estados[t.id]
+                del t.history[hasta:]
+        del service.audit.events[eventos:]
         raise BudgetError("IMPORT_VALIDATION_FAILED", str(exc))
     return ImportResult("COMMITTED", len(parsed))

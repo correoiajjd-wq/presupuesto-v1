@@ -241,7 +241,10 @@ class BudgetEngine:
         out: dict[str, list[dict]] = defaultdict(list)
         conocidos = {cc.id for cc, _k, _l in cfg.cost_centers()}
         for cc_id in sorted(conocidos):
-            out[cc_id].append({"desde": fy_start, "aplica": self.periods[0],
+            # La foto inicial rige desde que la operación existe: una sucursal
+            # que abre en junio no tiene dotación en enero salvo que alguien
+            # cargue una solicitud con esa fecha.
+            out[cc_id].append({"desde": fy_start, "aplica": self._primer_periodo(cc_id),
                                "personas": personas.get(cc_id, ZERO),
                                "nominal": inicial.get(cc_id, ZERO)})
 
@@ -273,10 +276,21 @@ class BudgetEngine:
                     "personas": d(iv.value), "nominal": monto})
         return out
 
+    def _primer_periodo(self, cost_center_id: str) -> Optional[Period]:
+        kind, owner = self.cfg.cost_center_owner(cost_center_id)
+        if kind != "OPERATION":
+            return self.periods[0]
+        activos = [p for p in self.periods if self._operation_active(owner, p)]
+        return activos[0] if activos else None
+
     def _mes_siguiente(self, fecha: date) -> Optional[Period]:
         p = Period(fecha.year, fecha.month)
         siguiente = [q for q in self.periods if q.first_day > p.first_day]
         return siguiente[0] if siguiente else None
+
+    def _to_pres_on(self, amount: Decimal, currency: str, day: date) -> Decimal:
+        """Un saldo se valúa el día que existe, no el día que lo miramos."""
+        return d(amount) * self.fx.rate_on(currency, day)
 
     def _to_pres_flat(self, amount: Decimal, currency: str) -> Decimal:
         """El nominal se convierte con el TC del primer período: es un valor de
@@ -494,7 +508,13 @@ class BudgetEngine:
         _por_periodo(company_parts, scope_co(), "EXPENSES_COMPANY_LEVEL")
 
     @staticmethod
-    def _proportional(amount_key: str, num_key: str, den_key: str):
+    def _proportional(amount_key: str, num_key: str, den_key: str, entre: int = 0):
+        """Reparte proporcionalmente al driver, y en partes iguales si no hay driver.
+
+        Sin el reparto en partes iguales, un pool cuyo driver es cero —una
+        sucursal que todavía no vendió— no se le asigna a nadie y desaparece:
+        la suma de los resultados por operación deja de dar el EBITDA.
+        """
         def _fn(v):
             amount = v.get(amount_key)
             num = v.get(num_key)
@@ -502,7 +522,7 @@ class BudgetEngine:
             if amount is None:
                 return None
             if not den:
-                return ZERO
+                return amount / Decimal(entre) if entre else ZERO
             return amount * (num or ZERO) / den
         return _fn
 
@@ -521,6 +541,12 @@ class BudgetEngine:
         scopes |= {scope_bu(u.id) for u in cfg.business_units}
         scopes |= {scope_br(b.id) for b in cfg.branches}
         scopes |= {scope_su(u.id) for u in cfg.support_units} | {scope_co()}
+        scopes |= {scope_cc(cc.id) for cc, _k, _l in cfg.cost_centers()}
+        for s in loaded:
+            if s not in scopes:
+                self.missing.append(
+                    f"INVALID_CAPEX_SCOPE: CAPEX cargado en {s}, que no es un ámbito "
+                    "del modelo; no se suma a ningún total")
         scopes |= set(loaded.keys())
         for s in sorted(scopes):
             for p in self.periods:
@@ -547,7 +573,8 @@ class BudgetEngine:
                         keys = keys + [nk("EXPENSES_UNIT_LEVEL", scope_bu(unit.id), p.code)]
                     if metric == "CAPEX_OWN":
                         target = nk("CAPEX", scope_bu(unit.id), p.code)
-                        keys = keys + [nk("CAPEX_OWN", scope_bu(unit.id), p.code)]
+                        keys = ([nk("CAPEX", s, p.code) for s in ops]
+                                + [nk("CAPEX_OWN", scope_bu(unit.id), p.code)])
                     self.g.calc(target, keys, sum_of(keys),
                                 formula="suma de las operaciones de la unidad")
                 self._ebitda(scope_bu(unit.id), p.code)
@@ -562,22 +589,25 @@ class BudgetEngine:
                         keys = keys + [nk("EXPENSES_BRANCH_LEVEL", scope_br(b.id), p.code)]
                     if metric == "CAPEX_OWN":
                         target = nk("CAPEX", scope_br(b.id), p.code)
-                        keys = keys + [nk("CAPEX_OWN", scope_br(b.id), p.code)]
+                        keys = ([nk("CAPEX", s, p.code) for s in ops]
+                                + [nk("CAPEX_OWN", scope_br(b.id), p.code)])
                     self.g.calc(target, keys, sum_of(keys),
                                 formula="suma de las operaciones de la sucursal")
                 self._ebitda(scope_br(b.id), p.code)
 
             # --- operaciones: EBITDA propio ---
             for o in cfg.operations:
-                self.g.calc(nk("CAPEX", scope_op(o.id), p.code),
-                            [nk("CAPEX_OWN", scope_op(o.id), p.code)],
-                            sum_of([nk("CAPEX_OWN", scope_op(o.id), p.code)]))
+                keys = [nk("CAPEX_OWN", s, p.code)
+                        for s in (scope_op(o.id), scope_cc(o.cost_center.id))]
+                self.g.calc(nk("CAPEX", scope_op(o.id), p.code), keys, sum_of(keys),
+                            formula="CAPEX propio y el de su centro de costo")
                 self._ebitda(scope_op(o.id), p.code)
 
             for su in cfg.support_units:
-                self.g.calc(nk("CAPEX", scope_su(su.id), p.code),
-                            [nk("CAPEX_OWN", scope_su(su.id), p.code)],
-                            sum_of([nk("CAPEX_OWN", scope_su(su.id), p.code)]))
+                keys = [nk("CAPEX_OWN", scope_su(su.id), p.code)]
+                keys += [nk("CAPEX_OWN", scope_cc(cc.id), p.code) for cc in su.cost_centers]
+                self.g.calc(nk("CAPEX", scope_su(su.id), p.code), keys, sum_of(keys),
+                            formula="CAPEX propio y el de sus centros de costo")
 
             # --- empresa: suma de unidades, más lo propio y lo de soporte ---
             bu_scopes = [scope_bu(u.id) for u in cfg.business_units]
@@ -598,10 +628,13 @@ class BudgetEngine:
                      + [nk("EXPENSES_COMPANY_LEVEL", scope_co(), p.code)])
             self.g.calc(nk("EXPENSES", scope_co(), p.code), ekeys, sum_of(ekeys),
                         formula="gastos de unidades + soporte + sucursales + empresa")
+            # El CAPEX de una sucursal no está dentro de ninguna unidad: si no
+            # se suma acá, aparece en el reporte de la sucursal y no en el total.
             ckeys = ([nk("CAPEX", s, p.code) for s in bu_scopes + su_scopes]
+                     + [nk("CAPEX_OWN", scope_br(b.id), p.code) for b in cfg.branches]
                      + [nk("CAPEX_OWN", scope_co(), p.code)])
             self.g.calc(nk("CAPEX", scope_co(), p.code), ckeys, sum_of(ckeys),
-                        formula="CAPEX total")
+                        formula="CAPEX de unidades, soporte, sucursales y empresa")
             self._ebitda(scope_co(), p.code)
 
     def _ebitda(self, scope: str, period_code: str) -> None:
@@ -656,21 +689,23 @@ class BudgetEngine:
                 sfy_op = nk("SALES", scope_op(o.id), FY)
                 desde_empresa = nk("ALLOC_FROM_COMPANY", scope_op(o.id), p.code)
                 self.g.calc(desde_empresa, [pool, sfy_op, sfy_co],
-                            self._proportional(pool, sfy_op, sfy_co),
+                            self._proportional(pool, sfy_op, sfy_co, len(cfg.operations)),
                             formula="pool corporativo por participación en ventas")
 
                 unit_lvl = nk("EXPENSES_UNIT_LEVEL", scope_bu(o.business_unit_id), p.code)
                 sfy_bu = nk("SALES", scope_bu(o.business_unit_id), FY)
                 desde_unidad = nk("ALLOC_FROM_UNIT", scope_op(o.id), p.code)
                 self.g.calc(desde_unidad, [unit_lvl, sfy_op, sfy_bu],
-                            self._proportional(unit_lvl, sfy_op, sfy_bu),
+                            self._proportional(unit_lvl, sfy_op, sfy_bu,
+                                               len(cfg.unit_operations(o.business_unit_id))),
                             formula="gastos de la unidad, repartidos por ventas")
 
                 branch_lvl = nk("EXPENSES_BRANCH_LEVEL", scope_br(o.branch_id), p.code)
                 sfy_br = nk("SALES", scope_br(o.branch_id), FY)
                 desde_sucursal = nk("ALLOC_FROM_BRANCH", scope_op(o.id), p.code)
                 self.g.calc(desde_sucursal, [branch_lvl, sfy_op, sfy_br],
-                            self._proportional(branch_lvl, sfy_op, sfy_br),
+                            self._proportional(branch_lvl, sfy_op, sfy_br,
+                                               len(cfg.branch_operations(o.branch_id))),
                             formula="gastos de la sucursal, repartidos por ventas")
 
                 keys = [desde_empresa, desde_unidad, desde_sucursal]
@@ -758,9 +793,9 @@ class BudgetEngine:
 
                     open_key = nk("OPENING_STOCK", sscope, p.code)
                     if prev_close is None:
-                        val = self._to_pres(
-                            opening.get((base_scope, fam_id), ZERO), inv_ccy, p, FXConvention.CLOSING
-                        )
+                        val = self._to_pres_on(
+                            opening.get((base_scope, fam_id), ZERO), inv_ccy,
+                            self.fy.opening_balance_date)
                         self.g.constant(open_key, val, kind="INPUT",
                                         formula="stock inicial cargado", currency=inv_ccy)
                     else:
@@ -847,15 +882,15 @@ class BudgetEngine:
         for iv in self.inputs.of(Concept.BALANCE_PROJECTED):
             by_item_proj[iv.balance_item_id] = d(iv.value)
 
-        last = self.periods[-1]
+        fechas = {"OPENING": self.fy.opening_balance_date, "FY": self.fy.end}
         for tag, data in (("OPENING", by_item_open), ("FY", by_item_proj)):
             item_keys: dict[str, str] = {}
             for item in cfg.balance.items:
                 key = nk("BALANCE_ITEM", f"BI:{item.id}", tag)
                 if item.source is BalanceSource.CALCULATED:
                     continue  # el patrimonio se resuelve abajo
-                val = self._to_pres(data.get(item.id, ZERO), cfg.balance.currency, last,
-                                    FXConvention.CLOSING)
+                val = self._to_pres_on(data.get(item.id, ZERO), cfg.balance.currency,
+                                       fechas[tag])
                 self.g.constant(key, val, kind="INPUT", item=item.name,
                                 section=item.section.value, currency=cfg.balance.currency)
                 item_keys[item.id] = key

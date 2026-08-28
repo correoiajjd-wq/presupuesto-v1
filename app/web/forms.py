@@ -89,7 +89,11 @@ def _fmt(v: Optional[Decimal]) -> str:
     if v is None:
         return ""
     v = Decimal(v)
-    return str(int(v)) if v == v.to_integral_value() else str(v)
+    if v == v.to_integral_value():
+        return str(int(v))
+    # El nominal se guarda por persona, así que el total puede traer el resto
+    # de una división: mostrarlo con veinte decimales no ayuda a nadie.
+    return str(v.quantize(Decimal("0.01")).normalize())
 
 
 # ==========================================================================
@@ -484,16 +488,7 @@ def add_headcount_change(service, actor: str, version, task, form) -> None:
 
 
 def remove_headcount_change(service, actor: str, version, movement_id: str) -> None:
-    """Al borrar una solicitud se va también su valorización: un importe sin
-    solicitud no es de nadie."""
-    version.assert_mutable()
-    quedan = [iv for iv in version.inputs.values if iv.movement_id != movement_id]
-    if len(quedan) == len(version.inputs.values):
-        raise ValueError("Esa solicitud ya no existe.")
-    version.inputs.values = quedan
-    version.invalidate()
-    service.audit.record(actor=actor, action="MovementRemoved", entity_type="HEADCOUNT_CHANGE",
-                         entity_id=movement_id, version_id=version.id, before=movement_id)
+    service.remove_inputs(actor, version, movement_id)
 
 
 def add_capex(service, actor: str, version, form) -> None:

@@ -14,7 +14,16 @@
       <select name="inventory_level" {{ 'disabled' if not editable }}>
         {% for lvl, lbl in [('COMPANY','Empresa'),('BUSINESS_UNIT','Unidad de negocio'),('OPERATION','Operación (unidad x sucursal)')] %}
         <option value="{{ lvl }}" {{ 'selected' if cfg.inventory.level.value==lvl }}>{{ lbl }}</option>{% endfor %}
+      </select>  <div class="row" style="margin-top:10px">
+    <div style="flex:1"><label class="small">Frecuencia de carga del CAPEX</label>
+      <select name="capex_frequency" {{ 'disabled' if not editable }}>
+        {% for f in ['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'] %}
+        <option value="{{ f }}" {{ 'selected' if cfg.capex.frequency.value==f }}>{{ f|lower }}</option>
+        {% endfor %}
       </select></div>
+    <div style="flex:2"></div>
+  </div>
+</div>
     <div style="flex:1"><label class="small">Frecuencia de compras</label>
       <select name="inventory_frequency" {{ 'disabled' if not editable }}>
         {% for f in ['MONTHLY','QUARTERLY','SEMIANNUAL','ANNUAL'] %}

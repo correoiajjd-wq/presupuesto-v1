@@ -570,6 +570,28 @@ class TestGovernance(unittest.TestCase):
             self.service.submit_input("u.br01", self.version, iv, "budget.sales.load")
         self.assertEqual(ctx.exception.code, "UNAUTHORIZED_SCOPE")
 
+    def test_el_circuito_que_definio_el_cfo_se_respeta(self):
+        """El workflow decía quién revisa y quién aprueba, y no lo miraba nadie."""
+        balance = next(t for t in self.version.tasks.values() if t.concept == "BALANCE")
+        balance.status = TaskStatus.IN_REVIEW
+        with self.assertRaises(BudgetError) as ctx:
+            self.service.reject_task("u.coo", self.version, balance.id, "no")
+        self.assertEqual(ctx.exception.code, "UNAUTHORIZED_ROLE")
+        ventas = next(t for t in self.version.tasks.values() if t.concept == "SALES")
+        ventas.status = TaskStatus.IN_REVIEW
+        self.service.reject_task("u.coo", self.version, ventas.id, "faltan datos")
+        self.assertEqual(ventas.status, TaskStatus.DRAFT)
+
+    def test_borrar_pide_el_mismo_permiso_que_cargar(self):
+        """Borrar es cargar al revés: Finanzas borraba dotación ajena."""
+        with self.assertRaises(BudgetError) as ctx:
+            self.service.remove_inputs("u.fin", self.version, "MOV-01")
+        self.assertEqual(ctx.exception.code, "UNAUTHORIZED")
+        tarea = self.version.task_for("PAYROLL_SALARY", "CO")
+        tarea.status = TaskStatus.APPROVED
+        self.assertEqual(self.service.remove_inputs("u.br01", self.version, "MOV-01"), 2)
+        self.assertEqual(tarea.status, TaskStatus.IN_REVIEW)
+
     def test_capacidad_requerida(self):
         iv = InputValue(concept=Concept.SALES_QTY, period="2027-01", value=D(10),
                         operation_id="OP-01", product_id="P-001")
@@ -751,6 +773,73 @@ class TestCicloDeVida(unittest.TestCase):
         distinto.value = igual.value + D(1)
         self.service.submit_input("u.br01", self.version, distinto, "budget.sales.load")
         self.assertEqual(task.status, TaskStatus.IN_REVIEW)
+
+
+class TestLaPlataNoDesaparece(unittest.TestCase):
+    """Lo peor que puede hacer un presupuesto es dar un número mal sin avisar."""
+
+    def setUp(self):
+        self.service, self.budget, self.version = bootstrap()
+        self.cfg = self.version.configuration
+
+    def test_la_asignacion_cierra_aunque_una_sucursal_no_venda(self):
+        """Si el driver es cero el pool se repartía entre nadie y desaparecía."""
+        self.version.inputs.values = [
+            iv for iv in self.version.inputs.values
+            if not (iv.operation_id == "OP-03" and iv.concept is Concept.SALES_AMOUNT)]
+        self.version.invalidate()
+        values = self.version.calculate()
+        suma = sum(val(values, "RESULT_AFTER_ALLOCATION", scope_op(o.id))
+                   for o in self.cfg.operations)
+        self.assertAlmostEqual(float(suma), float(val(values, "EBITDA", scope_co())), places=4)
+
+    def test_el_capex_de_una_sucursal_llega_al_total(self):
+        antes = val(self.version.calculate(), "CAPEX", scope_co())
+        self.version.inputs.add(InputValue(
+            concept=Concept.CAPEX_AMOUNT, period="2027-03", value=D(100_000), currency="USD",
+            branch_id="BR-01", capex_category_id="CAT-01"))
+        self.version.inputs.add(InputValue(
+            concept=Concept.CAPEX_AMOUNT, period="2027-04", value=D(70_000), currency="USD",
+            cost_center_id="CC-101", capex_category_id="CAT-01"))
+        self.version.invalidate()
+        self.assertEqual(val(self.version.calculate(), "CAPEX", scope_co()), antes + D(170_000))
+
+    def test_lo_que_el_motor_no_lee_se_rechaza_al_cargar(self):
+        """Cargar contra un ámbito que nadie mira devolvía OK y la plata no
+        entraba a ningún total."""
+        casos = [
+            InputValue(concept=Concept.EXPENSE_AMOUNT, period="2027-01", value=D(999_999),
+                       currency="USD", expense_id="EXP-03", branch_id="BR-01"),
+            InputValue(concept=Concept.COMMISSION_AMOUNT, period="2027-01", value=D(250_000),
+                       currency="USD", operation_id="OP-03"),
+            InputValue(concept=Concept.OPENING_STOCK, value=D(50_000), currency="USD",
+                       business_unit_id="BU-01", family_id="FAM-REP"),
+        ]
+        for iv in casos:
+            with self.assertRaises(BudgetError):
+                self.service.submit_input("u.cfo", self.version, iv, "budget.expense.load")
+
+    def test_la_nomina_respeta_la_vigencia_de_la_operacion(self):
+        """Salto abre en junio: en enero no tiene ventas y tampoco tenía que
+        tener nómina."""
+        values = self.version.calculate()
+        self.assertEqual(val(values, "PAYROLL", scope_op("OP-02"), "2027-01"), D(0))
+        self.assertGreater(val(values, "PAYROLL", scope_op("OP-02"), "2027-06"), D(0))
+
+    def test_los_saldos_de_apertura_usan_el_tipo_de_cambio_de_su_fecha(self):
+        """Un saldo se valúa el día que existe, no el último día del ejercicio."""
+        service, budget, version = bootstrap()
+        cfg = version.configuration
+        cfg.balance.currency = "UYU"
+        version.fx.add_flat("UYU", date(2027, 1, 1), date(2027, 12, 31), D("0.03"))
+        version.fx.add("UYU", cfg.fiscal_year.opening_balance_date, D("0.05"))
+        version.invalidate()
+        activo = version.calculate()[nk("ASSETS", scope_co(), "OPENING")]
+        cargado = sum(iv.value for iv in version.inputs.values
+                      if iv.concept is Concept.BALANCE_OPENING
+                      and cfg.balance.items[[i.id for i in cfg.balance.items].index(
+                          iv.balance_item_id)].section.value == "ASSET")
+        self.assertEqual(activo, cargado * D("0.05"))
 
 
 class TestVersiones(unittest.TestCase):

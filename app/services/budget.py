@@ -27,6 +27,7 @@ from ..domain.inputs import Concept, InputSet, InputStatus, InputValue
 from ..domain.money import FXTable
 from ..domain.validation import (
     Alert,
+    AlertStatus,
     Finding,
     Severity,
     collect_assumptions,
@@ -261,6 +262,7 @@ class BudgetVersion:
     scenarios: dict[str, "Scenario"] = field(default_factory=dict)
     _graph: Optional[DependencyGraph] = None
     _values: Optional[dict] = None
+    _warnings: list[str] = field(default_factory=list)
 
     # -- inmutabilidad -----------------------------------------------------
     @property
@@ -279,12 +281,26 @@ class BudgetVersion:
     def invalidate(self) -> None:
         self._graph = None
         self._values = None
+        self._warnings = []
 
     @property
     def graph(self) -> DependencyGraph:
         if self._graph is None:
-            self._graph = BudgetEngine(self.configuration, self.fx, self.inputs).build()
+            engine = BudgetEngine(self.configuration, self.fx, self.inputs)
+            self._graph = engine.build()
+            self._warnings = engine.missing
         return self._graph
+
+    @property
+    def warnings(self) -> list[str]:
+        """Lo que el motor tuvo que ignorar al construir el grafo.
+
+        Son datos cargados que no llegan a ningún total: si nadie los mira,
+        el usuario carga, el sistema le dice que está bien, y la plata no
+        aparece en ningún lado.
+        """
+        self.graph
+        return self._warnings
 
     def calculate(self, force: bool = False) -> dict:
         if self._values is None or force:
@@ -497,10 +513,19 @@ class BudgetService:
                     out.append(t)
         return out
 
-    def _transition(self, actor: str, version: BudgetVersion, task: Task,
-                    new: TaskStatus, capability: str, comment: Optional[str] = None) -> Task:
+    def _transition(self, actor: str, version: BudgetVersion, task: Task, new: TaskStatus,
+                    capability: str, comment: Optional[str] = None,
+                    role_attr: str = "loader_role") -> Task:
+        """El workflow que arma el CFO dice quién carga, quién revisa y quién
+        aprueba cada concepto. Sin este control era decorativo."""
         user = self.user(actor)
         self.auth.check(user, capability, task.scope_key, version.configuration)
+        requerido = getattr(task, role_attr)
+        if requerido not in user.roles and Role.CFO not in user.roles:
+            raise BudgetError(
+                "UNAUTHORIZED_ROLE",
+                f"{user.name} no es {requerido.value} en «{task.label}»: ese circuito lo "
+                "definió la configuración.")
         if not task.can_transition(new):
             raise BudgetError(
                 "WORKFLOW_INVALID_TRANSITION",
@@ -530,7 +555,8 @@ class BudgetService:
 
     def approve_task(self, actor: str, version: BudgetVersion, task_id: str) -> Task:
         task = version.tasks[task_id]
-        t = self._transition(actor, version, task, TaskStatus.APPROVED, "budget.approve")
+        t = self._transition(actor, version, task, TaskStatus.APPROVED, "budget.approve",
+                             role_attr="approver_role")
         for iv in version.inputs_of(task):
             iv.status = InputStatus.APPROVED
         return t
@@ -539,8 +565,10 @@ class BudgetService:
         if not comment:
             raise BudgetError("MISSING_COMMENT", "El rechazo requiere un motivo (doc 02 §48).")
         task = version.tasks[task_id]
-        self._transition(actor, version, task, TaskStatus.REJECTED, "budget.review", comment)
-        t = self._transition(actor, version, task, TaskStatus.DRAFT, "budget.review", comment)
+        self._transition(actor, version, task, TaskStatus.REJECTED, "budget.review", comment,
+                         role_attr="reviewer_role")
+        t = self._transition(actor, version, task, TaskStatus.DRAFT, "budget.review", comment,
+                             role_attr="reviewer_role")
         for iv in version.inputs_of(task):
             iv.status = InputStatus.REJECTED
         return t
@@ -590,6 +618,27 @@ class BudgetService:
                           entity_id=task.id, version_id=version.id,
                           before=TaskStatus.NOT_STARTED.value, after=TaskStatus.DRAFT.value)
 
+    def remove_inputs(self, actor: str, version: BudgetVersion, movement_id: str,
+                      capability: str = "budget.headcount.load") -> int:
+        """Borrar es cargar al revés: pide el mismo permiso y tiene las mismas
+        consecuencias sobre lo que ya estaba aprobado."""
+        version.assert_mutable()
+        afectados = [iv for iv in version.inputs.values if iv.movement_id == movement_id]
+        if not afectados:
+            raise BudgetError("NOT_FOUND", "Esa solicitud ya no existe.")
+        user = self.user(actor)
+        for iv in afectados:
+            self.auth.check(user, capability, iv.scope_key, version.configuration)
+        version.inputs.values = [iv for iv in version.inputs.values
+                                 if iv.movement_id != movement_id]
+        version.invalidate()
+        for iv in afectados:
+            self.audit.record(actor=actor, action="InputRemoved", entity_type=iv.concept.value,
+                              entity_id=iv.identity(), version_id=version.id,
+                              before=str(iv.value), after=None)
+            self._invalidate_dependent_approvals(version, iv)
+        return len(afectados)
+
     def _invalidate_dependent_approvals(self, version: BudgetVersion, iv: InputValue) -> None:
         """Doc 04 §47: aprobación parcial. Sólo vuelve a revisión lo afectado."""
         afectada = version.task_for(iv.group, iv.scope_key)
@@ -633,10 +682,19 @@ class BudgetService:
         findings += validate_configuration(cfg, version.fx)
         findings += validate_inputs(cfg, version.inputs)
         findings += missing_required_inputs(cfg, version.inputs)
+        findings += [Finding(m.split(":")[0], m, Severity.BLOCKING) for m in version.warnings]
         findings += validate_balance(cfg, values, "OPENING")
         if cfg.balance.enabled:
             findings += validate_balance(cfg, values, FY)
+        # Las alertas se recalculan en cada validación: si no se arrastra lo
+        # que alguien ya resolvió o aceptó, resolverlas no sirve de nada.
+        previas = {(a.code, a.entity, a.message): a for a in version.alerts}
         alerts = evaluate_objectives(cfg, values)
+        for a in alerts:
+            anterior = previas.get((a.code, a.entity, a.message))
+            if anterior is not None and anterior.status is not AlertStatus.PENDING:
+                a.status, a.comment = anterior.status, anterior.comment
+                a.resolved_by, a.resolved_at = anterior.resolved_by, anterior.resolved_at
         version.alerts = alerts
         pending_tasks = [t for t in version.tasks.values() if t.status is not TaskStatus.APPROVED]
         return {

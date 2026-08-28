@@ -309,14 +309,6 @@ class ExpenseDefinition(BaseModel):
                     "INVALID_ALLOCATION",
                     f"gasto {self.name}: la distribución suma {total * 100}%, debe sumar 100%")
         return self
-
-    def target_for(self, scope_key: str) -> Optional[ExpenseTarget]:
-        for t in self.targets:
-            if t.scope_key == scope_key:
-                return t
-        return None
-
-
 # --------------------------------------------------------------------------
 # Nómina
 # --------------------------------------------------------------------------
@@ -532,10 +524,6 @@ class Configuration(BaseModel):
 
     def operation_unit(self, operation_id: str) -> BusinessUnit:
         return self.unit(self.operation(operation_id).business_unit_id)
-
-    def operation_branch(self, operation_id: str) -> Branch:
-        return self.branch(self.operation(operation_id).branch_id)
-
     def operation_label(self, operation_id: str) -> str:
         o = self.operation(operation_id)
         return f"{self.unit(o.business_unit_id).name} / {self.branch(o.branch_id).name}"
@@ -675,10 +663,7 @@ class Configuration(BaseModel):
             if low in seen_names:
                 errors.append(f"DUPLICATE_BRANCH_NAME: hay más de una sucursal llamada {b.name}")
             seen_names.add(low)
-            for f, label in ((b.effective_from, "inicio"), (b.effective_to, "cierre")):
-                if f and not (fy.start <= f <= fy.end):
-                    errors.append(
-                        f"INVALID_PERIOD: sucursal {b.name} fecha de {label} fuera del ejercicio")
+            errors += self._effectivity_errors(b, f"sucursal {b.name}")
 
         pares: set[tuple[str, str]] = set()
         nombres_cc: set[str] = set()
@@ -701,14 +686,12 @@ class Configuration(BaseModel):
                 errors.append(f"DUPLICATE_COST_CENTER_NAME: hay más de un centro de costo "
                               f"llamado {o.cost_center.name}")
             nombres_cc.add(nombre)
-            for f, label in ((o.effective_from, "inicio"), (o.effective_to, "cierre")):
-                if f and not (fy.start <= f <= fy.end):
-                    errors.append(f"INVALID_PERIOD: {self.operation_label(o.id)} "
-                                  f"fecha de {label} fuera del ejercicio")
+            errors += self._effectivity_errors(o, self.operation_label(o.id))
 
         codigos_producto: dict[str, str] = {}
         for u in self.business_units:
             uniq("BU", u.id)
+            errors += self._effectivity_errors(u, f"unidad {u.name}")
             if not u.products:
                 errors.append(f"INCOMPLETE_CONFIGURATION: la unidad {u.name} no tiene productos")
             for fam in u.missing_other_products():
@@ -733,6 +716,7 @@ class Configuration(BaseModel):
 
         for su in self.support_units:
             uniq("SU", su.id)
+            errors += self._effectivity_errors(su, f"área de soporte {su.name}")
             # Un área de soporte sin centro de costo no tiene contra qué imputar
             # sus gastos: no puede existir.
             if not su.cost_centers:
@@ -792,7 +776,7 @@ class Configuration(BaseModel):
         """Doc 02 §42: la obligatoriedad surge del modelo, no de una lista rígida."""
         from .ratios import RATIO_CATALOG
 
-        required = {"SALES", "EXPENSES", "PAYROLL_HEADCOUNT", "PAYROLL_SALARY"}
+        required = {"SALES", "EXPENSES", "PAYROLL_SALARY"}
         if self.capex.enabled:
             required.add("CAPEX")
         if self.inventory.enabled:
@@ -806,6 +790,16 @@ class Configuration(BaseModel):
             if ratio:
                 required |= set(ratio.required_inputs)
         return required
+
+    def _effectivity_errors(self, entity: Effectivity, donde: str) -> list[str]:
+        errors: list[str] = []
+        for f, label in ((entity.effective_from, "inicio"), (entity.effective_to, "cierre")):
+            if f and not (self.fiscal_year.start <= f <= self.fiscal_year.end):
+                errors.append(f"INVALID_PERIOD: {donde} fecha de {label} fuera del ejercicio")
+        desde, hasta = entity.effective_from, entity.effective_to
+        if desde and hasta and hasta < desde:
+            errors.append(f"INVALID_PERIOD: {donde} cierra el {hasta}, antes de abrir el {desde}")
+        return errors
 
     def _percentage_errors(self) -> list[str]:
         """Todo porcentaje se guarda como fracción: 0.25 es 25%.

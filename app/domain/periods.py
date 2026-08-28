@@ -102,10 +102,6 @@ class FiscalYear:
     def opening_balance_date(self) -> date:
         """Doc 02 §33: el balance inicial es el día anterior al inicio del ejercicio."""
         return self.start - _ONE_DAY
-
-    def contains(self, p: Period) -> bool:
-        return Period.of(self.start) <= p <= Period.of(self.end)
-
     def buckets(self, freq: Frequency) -> list[list[Period]]:
         """Agrupa los períodos del ejercicio según la frecuencia de carga.
 
