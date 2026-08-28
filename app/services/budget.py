@@ -13,6 +13,7 @@ Reglas duras del spec:
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -123,7 +124,9 @@ TASK_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 
 
 _TRANSITIONS = {
-    TaskStatus.NOT_STARTED: {TaskStatus.DRAFT},
+    # Una tarea sin nada cargado se puede enviar igual: que un centro de costo
+    # no pida gente este ejercicio es una respuesta, no una tarea a medio hacer.
+    TaskStatus.NOT_STARTED: {TaskStatus.DRAFT, TaskStatus.SUBMITTED},
     TaskStatus.DRAFT: {TaskStatus.DRAFT, TaskStatus.SUBMITTED},
     TaskStatus.SUBMITTED: {TaskStatus.IN_REVIEW, TaskStatus.REJECTED},
     TaskStatus.IN_REVIEW: {TaskStatus.APPROVED, TaskStatus.REJECTED},
@@ -410,6 +413,7 @@ class BudgetService:
         user = self.user(actor)
         self.auth.check(user, "budget.configuration.close")
         version.assert_mutable()
+        self.assert_configuration_open(version)
         findings = validate_configuration(version.configuration, version.fx)
         blocking = [f for f in findings if f.blocking]
         if blocking:
@@ -555,15 +559,36 @@ class BudgetService:
         if errors:
             raise BudgetError("INPUT_VALIDATION_FAILED", errors[0].message,
                               {"errors": [e.message for e in errors]})
-        iv.loaded_by = actor
         before = next((x for x in version.inputs.values if x.identity() == iv.identity()), None)
+        if version.inputs.unchanged(iv):
+            return before
+        iv.loaded_by = actor
         version.inputs.upsert(iv)
         version.invalidate()
         self.audit.record(actor=actor, action="InputSubmitted", entity_type=iv.concept.value,
                           entity_id=iv.identity(), version_id=version.id,
                           before=None if before is None else str(before.value), after=str(iv.value))
+        self._start_task(actor, version, iv)
         self._invalidate_dependent_approvals(version, iv)
         return iv
+
+    def _start_task(self, actor: str, version: BudgetVersion, iv: InputValue) -> None:
+        """Cargar un dato pone en marcha su tarea.
+
+        Antes lo hacía la ruta web, así que una tarea cargada por otro camino
+        —la API, o la pantalla de dotación— se quedaba para siempre en
+        NOT_STARTED y no había forma de aprobar la versión.
+        """
+        task = version.task_for(iv.group, iv.scope_key)
+        if task is None or task.status is not TaskStatus.NOT_STARTED:
+            return
+        task.status = TaskStatus.DRAFT
+        task.history.append({"at": _now().isoformat(), "actor": actor,
+                             "from": TaskStatus.NOT_STARTED.value, "to": TaskStatus.DRAFT.value,
+                             "comment": "se cargó el primer dato"})
+        self.audit.record(actor=actor, action="TaskStarted", entity_type="TASK",
+                          entity_id=task.id, version_id=version.id,
+                          before=TaskStatus.NOT_STARTED.value, after=TaskStatus.DRAFT.value)
 
     def _invalidate_dependent_approvals(self, version: BudgetVersion, iv: InputValue) -> None:
         """Doc 04 §47: aprobación parcial. Sólo vuelve a revisión lo afectado."""
@@ -626,6 +651,10 @@ class BudgetService:
         user = self.user(actor)
         self.auth.check(user, "budget.version.approve")
         version.assert_mutable()
+        if version.configuration.status is not ConfigStatus.LOCKED:
+            raise BudgetError("CONFIGURATION_NOT_CLOSED",
+                              "La configuración de esta versión todavía está abierta: "
+                              "hay que cerrarla para que existan las tareas de carga.")
         report = self.validate_version(version)
         if report["blocking"]:
             raise BudgetError("VERSION_NOT_READY",
@@ -658,25 +687,31 @@ class BudgetService:
         return budget
 
     def create_version(self, actor: str, budget: Budget, source_version_id: str) -> BudgetVersion:
-        """Doc 04 §45: clona configuración, inputs, reglas y (opcionalmente) escenarios."""
+        """Doc 04 §45: clona configuración e inputs.
+
+        La configuración vuelve a quedar abierta: es la salida que promete el
+        error CONFIGURATION_LOCKED, y sin esto una vez cerrada la V1 el modelo
+        no se podía cambiar nunca más. Las tareas no se clonan — se generan de
+        nuevo al cerrar, porque la estructura puede haber cambiado en el medio.
+
+        Todo se copia en profundidad, la tabla de tipos de cambio incluida: si
+        se compartiera, editar el TC acá movería los números de una versión ya
+        aprobada.
+        """
         user = self.user(actor)
         self.auth.check(user, "budget.version.create")
         source = budget.version(source_version_id)
+        configuration = source.configuration.model_copy(deep=True)
+        configuration.status = ConfigStatus.DRAFT
         new = BudgetVersion(
             id=_uid("VER"),
             number=max(v.number for v in budget.versions.values()) + 1,
             budget_id=budget.id,
-            configuration=source.configuration.model_copy(deep=True),
-            fx=source.fx,
+            configuration=configuration,
+            fx=deepcopy(source.fx),
             inputs=source.inputs.model_copy(deep=True),
             source_version_id=source.id,
         )
-        for t in source.tasks.values():
-            new.tasks[t.id] = Task(
-                id=t.id, concept=t.concept, scope_key=t.scope_key, label=t.label,
-                loader_role=t.loader_role, reviewer_role=t.reviewer_role,
-                approver_role=t.approver_role, status=t.status,
-            )
         budget.versions[new.id] = new
         self.audit.record(actor=actor, action="VersionCreated", entity_type="VERSION",
                           entity_id=new.id, version_id=new.id,

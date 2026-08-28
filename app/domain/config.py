@@ -762,6 +762,7 @@ class Configuration(BaseModel):
 
         if self.payroll.currency not in self.enabled_currencies:
             errors.append(f"INVALID_CURRENCY: {self.payroll.currency} en nómina")
+        errors += self._percentage_errors()
         for r in self.payroll.increase_rules:
             if not (fy.start <= r.effective_date <= fy.end):
                 errors.append(
@@ -805,6 +806,34 @@ class Configuration(BaseModel):
             if ratio:
                 required |= set(ratio.required_inputs)
         return required
+
+    def _percentage_errors(self) -> list[str]:
+        """Todo porcentaje se guarda como fracción: 0.25 es 25%.
+
+        Un 25 tipeado donde va 0.25 no rompe nada visible, multiplica el
+        resultado por cien y no lo frena nadie.
+        """
+        errors: list[str] = []
+
+        def check(valor: Optional[Decimal], donde: str, minimo: Decimal) -> None:
+            if valor is None:
+                return
+            if not (minimo <= valor < Decimal(1)):
+                errors.append(
+                    f"INVALID_PERCENTAGE: {donde} vale {valor}; se expresa como fracción "
+                    f"({minimo} a 1, donde 0.25 es 25%)")
+
+        for u in self.business_units:
+            for p in u.products:
+                check(p.commission_rate, f"la comisión de {p.code}", Decimal(0))
+        for c in self.payroll.percentage_concepts:
+            check(c.percentage, f"el concepto {c.concept}", Decimal(0))
+        for r in self.payroll.increase_rules:
+            check(r.percentage, f"el aumento del {r.effective_date}", Decimal(-1))
+        for e in self.expenses:
+            for t in e.targets:
+                check(t.percentage, f"la distribución de {e.name}", Decimal(0))
+        return errors
 
     def missing_modules_for_ratios(self) -> list[str]:
         """Doc 02 §37: seleccionar un ratio puede generar nuevos requerimientos."""

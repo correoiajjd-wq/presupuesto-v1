@@ -435,9 +435,13 @@ def apply_form(service, actor: str, version, task, formdata) -> int:
                 concept=Concept.BALANCE_OPENING if parts[0] == "BO" else Concept.BALANCE_PROJECTED,
                 value=value, currency=cfg.balance.currency, balance_item_id=parts[1]))
 
+    cambios = 0
     for iv in pending:
+        if version.inputs.unchanged(iv):
+            continue
         service.submit_input(actor, version, iv, spec.capability)
-    return len(pending)
+        cambios += 1
+    return cambios
 
 
 def _set_scope(iv: InputValue, scope_key: str, cfg: Configuration) -> None:

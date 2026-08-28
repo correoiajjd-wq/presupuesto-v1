@@ -127,6 +127,16 @@ class TestConfiguration(unittest.TestCase):
         pending = cfg.missing_modules_for_ratios()
         self.assertTrue(any("Stock" in m for m in pending))
 
+    def test_los_porcentajes_se_escriben_como_fraccion(self):
+        """Un 25 donde va 0.25 multiplicaba la nómina por cien sin que nada lo
+        frenara: sólo el margen de producto estaba validado."""
+        cfg = build_configuration()
+        cfg.business_units[1].products[0].commission_rate = D(5)
+        cfg.payroll.percentage_concepts[0].percentage = D(12)
+        cfg.payroll.increase_rules[0].percentage = D(8)
+        codigos = [e.split(":")[0] for e in cfg.validate_structure()]
+        self.assertEqual(codigos.count("INVALID_PERCENTAGE"), 3)
+
     def test_obligatoriedad_surge_del_modelo(self):
         """Doc 02 §42: no hay lista rígida de datos obligatorios."""
         cfg = build_configuration()
@@ -315,6 +325,18 @@ class TestPayroll(unittest.TestCase):
         self.assertEqual(val(despues, "HEADCOUNT", "CC:CC-103", "2027-06"), D(14))
         self.assertEqual(val(despues, "PAYROLL_BASE", "CC:CC-103", "2027-06"),
                          val(self.values, "PAYROLL_BASE", "CC:CC-103", "2027-06"))
+
+    def test_la_foto_inicial_no_admite_otro_ambito_ni_periodo(self):
+        """El motor agrupa la nómina por centro de costo. Si el mismo dato entra
+        además con otro ámbito o con período, se suma dos veces."""
+        for iv in (InputValue(concept=Concept.NOMINAL_SALARY, value=D(20_500), currency="USD",
+                              cost_center_id="CC-101", operation_id="OP-01"),
+                   InputValue(concept=Concept.NOMINAL_SALARY, value=D(20_500), currency="USD",
+                              cost_center_id="CC-101", period="2027-01")):
+            with self.assertRaises(BudgetError):
+                self.service.submit_input("u.payroll", self.version, iv, "budget.payroll.load")
+        self.assertEqual(self.version.calculate()[nk("PAYROLL_BASE", "CC:CC-101", "2027-01")],
+                         D(20_500) * D("1.17"))
 
     def test_la_foto_inicial_la_carga_nomina_por_centro_de_costo(self):
         cargados = {iv.cost_center_id for iv in self.version.inputs.values
@@ -676,6 +698,95 @@ class TestResponsables(unittest.TestCase):
         # y su propia tarea de solicitudes, del responsable que le pusieron
         self.assertTrue(any(t.concept == "PAYROLL_HEADCOUNT" and t.scope_key == "CC:CC-199"
                             for t in version.tasks.values()))
+
+
+class TestCicloDeVida(unittest.TestCase):
+    """Lo que se rompió al revisar: el presupuesto no se podía cerrar."""
+
+    def setUp(self):
+        self.service, self.budget, self.version = bootstrap()
+
+    def test_cargar_un_dato_pone_en_marcha_su_tarea(self):
+        """Antes lo hacía la ruta web, así que una tarea cargada por la API o
+        por la pantalla de dotación se quedaba muerta en NOT_STARTED."""
+        task = next(t for t in self.version.tasks.values()
+                    if t.concept == "SALES" and t.scope_key == "OP:OP-01")
+        task.status = TaskStatus.NOT_STARTED
+        self.service.submit_input("u.br01", self.version, InputValue(
+            concept=Concept.SALES_QTY, period="2027-01", value=D(9),
+            operation_id="OP-01", product_id="P-001"), "budget.sales.load")
+        self.assertEqual(task.status, TaskStatus.DRAFT)
+        self.service.submit_task("u.br01", self.version, task.id)
+        self.assertEqual(self.service.approve_task("u.cfo", self.version, task.id).status,
+                         TaskStatus.APPROVED)
+
+    def test_una_tarea_sin_nada_que_cargar_se_puede_enviar(self):
+        """Que un centro de costo no pida gente es una respuesta, no una tarea
+        a medio hacer."""
+        task = next(t for t in self.version.tasks.values()
+                    if t.concept == "PAYROLL_HEADCOUNT")
+        task.status = TaskStatus.NOT_STARTED
+        self.service.submit_task("u.br01", self.version, task.id)
+        self.assertEqual(task.status, TaskStatus.IN_REVIEW)
+
+    def test_cerrar_la_configuracion_dos_veces_no_duplica_tareas(self):
+        cuantas = len(self.version.tasks)
+        with self.assertRaises(BudgetError) as ctx:
+            self.service.close_configuration("u.cfo", self.version)
+        self.assertEqual(ctx.exception.code, "CONFIGURATION_LOCKED")
+        self.assertEqual(len(self.version.tasks), cuantas)
+
+    def test_guardar_lo_mismo_no_desaprueba_nada(self):
+        """Reenviar un formulario sin tocar nada no puede tirar abajo trabajo
+        ya aprobado."""
+        task = next(t for t in self.version.tasks.values()
+                    if t.concept == "SALES" and t.scope_key == "OP:OP-01")
+        task.status = TaskStatus.APPROVED
+        igual = next(iv for iv in self.version.inputs.values
+                     if iv.concept is Concept.SALES_QTY and iv.operation_id == "OP-01")
+        self.service.submit_input("u.br01", self.version, igual.model_copy(deep=True),
+                                  "budget.sales.load")
+        self.assertEqual(task.status, TaskStatus.APPROVED)
+        distinto = igual.model_copy(deep=True)
+        distinto.value = igual.value + D(1)
+        self.service.submit_input("u.br01", self.version, distinto, "budget.sales.load")
+        self.assertEqual(task.status, TaskStatus.IN_REVIEW)
+
+
+class TestVersiones(unittest.TestCase):
+    def setUp(self):
+        self.service, self.budget, self.version = bootstrap()
+        for t in self.version.tasks.values():
+            t.status = TaskStatus.APPROVED
+        self.service.approve_version("u.cfo", self.version)
+
+    def test_la_version_nueva_reabre_la_configuracion(self):
+        """Es la salida que promete CONFIGURATION_LOCKED. Sin esto, cerrada la
+        primera versión el modelo no se podía cambiar nunca más."""
+        v2 = self.service.create_version("u.cfo", self.budget, self.version.id)
+        self.assertEqual(v2.configuration.status, ConfigStatus.DRAFT)
+        self.assertEqual(v2.tasks, {})
+        self.assertEqual(len(v2.inputs.values), len(self.version.inputs.values))
+        v2.configuration.business_units[0].name = "Otro nombre"
+        self.service.close_configuration("u.cfo", v2)
+        self.assertEqual(v2.configuration.status, ConfigStatus.LOCKED)
+        self.assertTrue(v2.tasks)
+        self.assertEqual(self.version.configuration.business_units[0].name, "Repuestos")
+
+    def test_el_tipo_de_cambio_no_se_comparte_entre_versiones(self):
+        """Tocar el TC en la versión nueva movía los números de una versión ya
+        aprobada: era la única cosa que no se copiaba en profundidad."""
+        antes = self.version.calculate()[nk("SALES", scope_co(), FY)]
+        v2 = self.service.create_version("u.cfo", self.budget, self.version.id)
+        self.service.change_fx_rate("u.cfo", v2, "UYU", date(2027, 6, 15), D("0.05"))
+        self.version.invalidate()
+        self.assertEqual(self.version.calculate()[nk("SALES", scope_co(), FY)], antes)
+
+    def test_no_se_aprueba_una_version_con_la_configuracion_abierta(self):
+        v2 = self.service.create_version("u.cfo", self.budget, self.version.id)
+        with self.assertRaises(BudgetError) as ctx:
+            self.service.approve_version("u.cfo", v2)
+        self.assertEqual(ctx.exception.code, "CONFIGURATION_NOT_CLOSED")
 
 
 class TestDependencyGraph(unittest.TestCase):

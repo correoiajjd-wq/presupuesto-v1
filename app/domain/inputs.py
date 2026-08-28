@@ -133,6 +133,7 @@ class InputValue(BaseModel):
             self.expense_id or "",
             self.capex_category_id or "",
             self.balance_item_id or "",
+            self.cost_center_id or "",
             self.movement_id or "",
             self.period or "",
             self.effective_date.isoformat() if self.effective_date else "",
@@ -153,6 +154,18 @@ class InputSet(BaseModel):
     def of(self, *concepts: Concept) -> list[InputValue]:
         cs = set(concepts)
         return [v for v in self.values if v.concept in cs]
+
+    def unchanged(self, iv: InputValue) -> bool:
+        """Si el valor ya está cargado igual, guardarlo de nuevo no es un cambio.
+
+        Sin esto, reenviar un formulario sin tocar nada vuelve a escribir todo
+        y desaprueba la tarea entera.
+        """
+        key = iv.identity()
+        for existing in self.values:
+            if existing.identity() == key:
+                return existing.value == iv.value and existing.currency == iv.currency
+        return False
 
     def upsert(self, iv: InputValue) -> None:
         key = iv.identity()

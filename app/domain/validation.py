@@ -138,6 +138,19 @@ def validate_inputs(cfg: Configuration, inputs: InputSet) -> list[Finding]:
                     Severity.BLOCKING, tag))
 
         if iv.concept in (Concept.NOMINAL_SALARY, Concept.INITIAL_HEADCOUNT):
+            # El motor agrupa la nómina por centro de costo y por solicitud. Si
+            # el mismo dato entra además con otro ámbito o con un período, deja
+            # de reconocerse como el mismo y la masa salarial se suma dos veces.
+            if iv.operation_id or iv.branch_id or iv.business_unit_id or iv.support_unit_id:
+                out.append(Finding(
+                    "INVALID_PAYROLL_SCOPE",
+                    f"{tag}: la nómina se carga sólo contra el centro de costo, sin ámbito "
+                    "adicional", Severity.BLOCKING, tag))
+            if iv.period is not None:
+                out.append(Finding(
+                    "INVALID_PERIOD",
+                    f"{tag}: el nominal es mensual y vale para todo el ejercicio; no se "
+                    "carga por período", Severity.BLOCKING, tag))
             if not iv.cost_center_id and not iv.movement_id:
                 out.append(Finding("INVALID_PAYROLL_SCOPE",
                                    f"{tag}: la nómina se carga contra un centro de costo o "

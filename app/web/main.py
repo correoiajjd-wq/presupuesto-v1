@@ -174,9 +174,8 @@ def create_web_app(service: BudgetService, budget_id: str) -> Flask:
         v = version()
         task = v.tasks[task_id]
         n = apply_form(service, session["user_id"], v, task, request.form.to_dict())
-        if task.status is TaskStatus.NOT_STARTED:
-            task.status = TaskStatus.DRAFT
-        flash(f"{n} valores guardados como borrador.", "ok")
+        flash(f"{n} valores guardados como borrador." if n
+              else "No había nada para guardar: los valores ya estaban así.", "ok")
         return redirect(url_for("carga", task_id=task_id))
 
     @app.post("/tareas/<task_id>/dotacion")
